@@ -37,6 +37,25 @@ GPU:  NVIDIA GeForce GTX 950 — единственная карта, перед
 Board: ASRock H81M-VG4 R2.0, UEFI P1.50
 ```
 
+### Whole-workstation passthrough (нода `bare-pve`)
+
+Цель — «как будто хоста нет»: в гость уходят **все** периферийные контроллеры,
+хосту остаётся только storage и сеть.
+
+| Устройство                 | PCI            | IOMMU | Маппинг         |
+|----------------------------|----------------|-------|------------------|
+| GTX 950 (видео + HDMI-звук) | `0000:01:00`   | 1     | `gtx950` (primary/x-vga) |
+| USB 3.0 xHCI               | `0000:00:14.0` | 2     | `usb-xhci`       |
+| USB 2.0 EHCI #1            | `0000:00:1d.0` | 8     | `usb-ehci1`      |
+| USB 2.0 EHCI #2            | `0000:00:1a.0` | 4     | `usb-ehci2`      |
+| Onboard audio (Intel HDA)  | `0000:00:1b.0` | 5     | `onboard-audio`  |
+
+Остаётся хосту: SATA-контроллер (IOMMU 9, с него грузится PVE), Realtek NIC
+(IOMMU 10, `vmbr0`), MEI. Сеть гостя — виртуальная (`e1000`/`virtio`).
+
+Следствие: локальная консоль хоста (USB-клавиатура на самом хосте) перестаёт
+работать — доступ к `bare-pve` только по SSH / IPMI.
+
 ## Архитектура
 
 Репозиторий разделён на переиспользуемый модуль и окружения:
@@ -108,10 +127,14 @@ ssh <proxmox-host> 'bash -s' < scripts/iommu-vfio-setup.sh
 2. Добавляет модули `vfio`, `vfio_iommu_type1`, `vfio_pci` в `/etc/modules`.
 3. Автоопределяет дискретный GPU через `lspci` (VGA-функцию и связанную
    аудио-функцию), биндит обе на `vfio-pci` через `/etc/modprobe.d/vfio.conf`.
+   При `WS_FULL_PASSTHROUGH=1` (по умолчанию) туда же добавляет каждый USB-
+   контроллер, чья IOMMU-группа состоит только из USB-контроллеров, и onboard
+   HDA-контроллер, если он один в своей группе.
 4. Добавляет в blacklist конфликтующие драйверы (`nouveau`, `nvidia`,
    `nvidiafb`).
-5. Настраивает `softdep`, чтобы `vfio-pci` гарантированно захватывал
-   устройство раньше `nvidia`/`nouveau`.
+5. Настраивает `softdep`, чтобы `vfio-pci` захватывал устройства раньше
+   `nvidia`/`nouveau`/`nvidiafb` (и `xhci_pci`/`ehci_pci`/`snd_hda_intel`
+   при full-passthrough).
 6. Пересобирает `initramfs` только если конфигурация реально изменилась.
 7. Выводит диагностику IOMMU-группы устройства и предупреждает, если группа
    не изолирована чисто (актуально для старых чипсетов без ACS override).
@@ -132,18 +155,25 @@ lspci -k -s <gpu-pci-addr>   # ожидаем "Kernel driver in use: vfio-pci"
 
 ### PCI hardware mapping в Proxmox
 
-GPU передаётся в VM через `proxmox_hardware_mapping_pci`, который требует
-4 обязательных атрибута на каждое PCI-устройство:
+Каждое устройство передаётся через отдельный `proxmox_hardware_mapping_pci`.
+Модуль строит их из списка `var.passthrough` (`for_each` по `name`), по одной
+записи `map` **на ноду**:
 
 ```hcl
 {
   node         = "bare-pve"
-  path         = "0000:01:00.0"   # PCI-адрес
-  id           = "10de:1402"       # vendor:device ID
-  iommu_group  = 1                 # номер IOMMU-группы
-  subsystem_id = "10de:1402"       # subsystem vendor:device ID
+  path         = "0000:01:00"   # адрес БЕЗ функции -> пробрасываются все функции
+  id           = "10de:1402"     # vendor:device основной функции
+  iommu_group  = 1               # номер IOMMU-группы
+  subsystem_id = "10de:1402"     # subsystem vendor:device
 }
 ```
+
+**Ключевой момент:** `map` — это список альтернатив *по нодам кластера*, а не
+список функций устройства. Две записи для одной ноды (`…:00.0` и `…:00.1`)
+приводят к тому, что Proxmox пробрасывает только первую — так и получился
+«чёрный монитор»: в гость уходила лишь HDMI-аудио функция. Правильно —
+**одна** запись с `path = "0000:01:00"` (без `.0`), это форма «all functions».
 
 Узнать значения:
 
@@ -210,9 +240,11 @@ pveum role modify TerraformProv --privs "<существующие-права-ч
 | `proxmox_root_password`    | string      | — (sensitive)                | Пароль `root@pam` (нужен только для mapping)|
 | `vm_name`                  | string      | `windows-workstation`        | Имя VM                                      |
 | `cores`                    | number      | `2`                          | Количество ядер CPU                         |
-| `memory`                   | number      | `2048`                       | RAM, МБ                                     |
+| `memory`                   | number      | `4096`                       | RAM, МБ                                     |
 | `mac`                      | string      | `BC:24:11:F9:5D:82`          | MAC-адрес сетевого интерфейса               |
-| `os_type`                  | string      | `win10`                      | Тип гостевой ОС (`win10`, `l26` и т.д.)     |
+| `os_type`                  | string      | `win10`                      | Тип гостевой ОС (`win10`, `win11`, `l26`)   |
+| `agent_enabled`            | bool        | `false`                      | QEMU guest agent (включать после установки virtio-тулзов) |
+| `iso_file_id`              | string      | `local:iso/Win10_22H2_...`   | Volume ID установочного ISO                 |
 
 ### `mod/vm`
 
@@ -222,23 +254,31 @@ pveum role modify TerraformProv --privs "<существующие-права-ч
 | `node_name`           | string                                 | —               | Нода Proxmox                                      |
 | `cores`               | number                                 | `1`             | Количество ядер                                   |
 | `memory`              | number                                 | `512`           | RAM, МБ                                           |
-| `gpu_name`            | string                                 | `gtx950`        | Имя PCI hardware mapping                          |
+| `cpu_type`            | string                                 | `host`          | Модель CPU (`host` для passthrough-рабочки)       |
+| `agent_enabled`       | bool                                   | `false`         | Канал QEMU guest agent                            |
 | `datastore_id_disk`   | string                                 | `local-lvm`     | Datastore для дисков VM                           |
 | `disk_interface`      | string                                 | `sata0`         | Интерфейс основного диска (`sata0`/`scsi0`)       |
 | `disk_size`           | number                                 | `10`            | Размер диска, ГБ                                  |
-| `iso_file_id`         | string                                 | —               | Volume ID уже загруженного ISO (`local:iso/...`)  |
-| `boot_order`          | list(string)                          | `["ide3","sata0"]` | Порядок загрузки — **должен совпадать** с фактическим интерфейсом cdrom (см. известные ограничения) |
+| `cdrom_interface`     | string                                 | `ide3`          | Слот установочного ISO                            |
+| `iso_file_id`         | string                                 | `null`          | Volume ID ISO (`null` — пустой привод)            |
 | `network_bridge`      | string                                 | `vmbr0`         | Сетевой мост                                      |
-| `mac`                 | string                                 | —               | MAC-адрес                                         |
+| `mac`                 | string                                 | `BC:24:11:...`  | MAC-адрес                                         |
 | `network_model`       | string                                 | `e1000`         | Модель сетевой карты                              |
-| `gpu_devices`         | list(object)                          | `[]`            | Список PCI-устройств для passthrough (`path`, `id`, `iommu_group`, `subsystem_id`) |
-| `os_type`             | string                                 | `win10`         | `win10` — Windows, `l26` — Linux                  |
+| `os_type`             | string                                 | `win10`         | `win10`/`win11` — Windows, `l26` — Linux          |
+| `passthrough`         | list(object)                           | `[]`            | Список целых PCI-устройств → `hostpci0..N`. Поля: `name`, `path` (без функции = все функции), `id`, `subsystem_id`, `iommu_group`, `primary_gpu`, `rom_file` |
+| `usb_devices`         | list(object)                           | `[]`            | Отдельные USB-устройства по id/порту (запасной вариант, если не пробрасывается весь контроллер) |
+
+`boot_order` больше не переменная — выводится как `[cdrom_interface, disk_interface]`.
 
 ## Известные ограничения
 
 - **`proxmox_hardware_mapping_pci` доступен только под `root@pam`** — жёсткое
   ограничение Proxmox API (взаимодействие с IOMMU), не решается выдачей ролей
   обычному пользователю/токену. Отсюда — второй provider-alias в конфиге.
+- **`map` — это альтернативы по нодам, а не по функциям устройства** — одна
+  запись на ноду; `path` без функции (`0000:01:00`) = «all functions». Две
+  записи на одну ноду → Proxmox берёт только первую (был баг «чёрный монитор»:
+  пробрасывалась лишь `01:00.1` HDMI-аудио).
 - **`cdrom.interface` не гарантирует фактическое размещение** — провайдер
   может сам выбрать другой IDE-слот (в текущей конфигурации фактически
   используется `ide3`, а не запрошенный `ide2`). После `apply` необходимо
@@ -258,9 +298,19 @@ pveum role modify TerraformProv --privs "<существующие-права-ч
   serial redirect (при наличии `serial_device {}` в конфиге VM). Это
   ожидаемое поведение, не баг.
 - **GTX 950-эпохи железо на бюджетных платах** может не иметь в BIOS опций
-  Above 4G Decoding / Resizable BAR — при появлении `Code 43` у NVIDIA-драйвера
-  внутри Windows-гостя решается программно на уровне QEMU-аргументов
-  (`args: -cpu host,hidden-state=on,kvm=off`), без правки BIOS.
+  Above 4G Decoding / Resizable BAR — не блокер.
+- **Code 43 у NVIDIA-драйвера** — Proxmox сам добавляет `kvm=off` +
+  `hv_vendor_id` при `ostype = win10/win11` (видно в `qm showcmd`), так что
+  для Maxwell/Pascal обычно ничего делать не нужно. Если всё же вылезло —
+  `qm set <vmid> -args "-cpu host,kvm=off,hv_vendor_id=whatever,-hypervisor"`
+  на хосте (bpg-провайдер raw-`args` не поддерживает) или через hookscript.
+- **Монитор тёмный на экране OVMF** (primary GPU, `x-vga=1`) — vBIOS первичной
+  карты затирается POST-ом хоста. Дамп чистого ROM на ноде:
+  `echo 1 > /sys/bus/pci/devices/0000:01:00.0/rom;
+  cat /sys/bus/pci/devices/0000:01:00.0/rom > /usr/share/kvm/gtx950.rom;
+  echo 0 > /sys/bus/pci/devices/0000:01:00.0/rom`
+  затем `rom_file = "gtx950.rom"` в записи `passthrough`. Дамп делать, когда
+  картой владеет `vfio-pci` и ничего её не трогает.
 
 ## Заметки
 
