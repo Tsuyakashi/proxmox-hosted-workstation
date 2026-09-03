@@ -62,11 +62,29 @@ Board: ASRock H81M-VG4 R2.0, UEFI P1.50
 
 - **`mod/vm`** — универсальный модуль виртуальной машины Proxmox с опциональным
   GPU passthrough через `proxmox_hardware_mapping_pci`.
-- **`env/<name>`** — конкретные окружения (например, `env/windows`), которые
-  вызывают модуль с нужными параметрами (нода, CPU/RAM, GPU, ISO и т.д.).
+- **`env/<name>`** — конкретные окружения, которые вызывают модуль с нужными
+  параметрами (нода, CPU/RAM, GPU, ISO и т.д.):
+  - `env/windows` — Windows-рабочка, **владеет** cluster PCI-маппингами
+    (`manage_mappings = true`).
+  - `env/ubuntu` — Ubuntu 26.04 desktop, **только ссылается** на те же маппинги
+    по имени (`manage_mappings = false`).
 
 Каждое окружение хранит своё состояние отдельно (S3 backend, ключ
 `<env>/terraform.tfstate`).
+
+**`env/windows` и `env/ubuntu` взаимоисключающие** — это одно и то же железо
+(GPU + USB-контроллеры + звук `bare-pve`). Одновременно применён/запущен может
+быть только один. `env/windows` должен оставаться `apply`-нутым (его VM может
+быть просто остановлена), т.к. он держит маппинги, на которые смотрит
+`env/ubuntu`. Переключение:
+
+```bash
+terraform -chdir=env/windows apply   # VM 104 stopped, маппинги на месте
+terraform -chdir=env/ubuntu  apply   # поднимаем Ubuntu
+# обратно:
+terraform -chdir=env/ubuntu  destroy
+terraform -chdir=env/windows apply   # + qm start
+```
 
 ### Провайдеры
 
@@ -304,13 +322,21 @@ pveum role modify TerraformProv --privs "<существующие-права-ч
   для Maxwell/Pascal обычно ничего делать не нужно. Если всё же вылезло —
   `qm set <vmid> -args "-cpu host,kvm=off,hv_vendor_id=whatever,-hypervisor"`
   на хосте (bpg-провайдер raw-`args` не поддерживает) или через hookscript.
-- **Монитор тёмный на экране OVMF** (primary GPU, `x-vga=1`) — vBIOS первичной
-  карты затирается POST-ом хоста. Дамп чистого ROM на ноде:
-  `echo 1 > /sys/bus/pci/devices/0000:01:00.0/rom;
-  cat /sys/bus/pci/devices/0000:01:00.0/rom > /usr/share/kvm/gtx950.rom;
-  echo 0 > /sys/bus/pci/devices/0000:01:00.0/rom`
-  затем `rom_file = "gtx950.rom"` в записи `passthrough`. Дамп делать, когда
-  картой владеет `vfio-pci` и ничего её не трогает.
+- **Монитор тёмный на экране OVMF** (primary GPU, `x-vga=1`) — подтверждено на
+  GTX 950: `dmesg` даёт `vfio-pci 0000:01:00.0: No more image in the PCI ROM`,
+  а sysfs-дамп ROM содержит **только legacy-образ** (codetype 0, ~58 КБ), без
+  UEFI GOP. OVMF без GOP не может зажечь монитор до загрузки ОС.
+  - Windows: чёрный экран через весь OVMF + раннюю загрузку, монитор
+    загорается только когда стартует драйвер NVIDIA (и то если пройден
+    Code 43).
+  - Linux (`env/ubuntu`): in-tree `nouveau` инициализирует карту из копии
+    vBIOS **на самой карте** (PROM-mirror, доступен даже когда PCI ROM BAR
+    пустой) — монитор загорается на этапе KMS, без Code 43. Это самый
+    быстрый способ проверить, что весь passthrough-тракт рабочий.
+  - Чтобы видеть и POST/OVMF: нужен полный UEFI-vBIOS (legacy + EFI-образ).
+    Скачать под конкретную карту (`10de:1402`) с TechPowerup, при наличии
+    проверить/срезать NVIDIA-хедер, положить в `/usr/share/kvm/gtx950.rom`,
+    выставить `rom_file = "gtx950.rom"` в записи `passthrough`.
 
 ## Заметки
 

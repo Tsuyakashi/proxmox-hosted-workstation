@@ -8,10 +8,14 @@ moved {
 # One cluster-wide hardware mapping per passed-through device.
 # Creating/altering PCI mappings is restricted to root@pam by the Proxmox API
 # (IOMMU interaction), hence the proxmox.root provider alias.
+#
+# The mappings describe physical devices on the node, not this VM — set
+# manage_mappings = false in envs that only *consume* mappings another env
+# already owns (mutually-exclusive workstation VMs on the same hardware).
 resource "proxmox_hardware_mapping_pci" "this" {
   provider = proxmox.root
 
-  for_each = { for d in var.passthrough : d.name => d }
+  for_each = var.manage_mappings ? { for d in var.passthrough : d.name => d } : {}
 
   name = each.value.name
 
@@ -82,8 +86,10 @@ resource "proxmox_virtual_environment_vm" "this" {
   dynamic "hostpci" {
     for_each = { for idx, d in var.passthrough : idx => d }
     content {
-      device   = "hostpci${hostpci.key}"
-      mapping  = proxmox_hardware_mapping_pci.this[hostpci.value.name].name
+      device = "hostpci${hostpci.key}"
+      mapping = (var.manage_mappings
+        ? proxmox_hardware_mapping_pci.this[hostpci.value.name].name
+      : hostpci.value.name)
       pcie     = true
       rombar   = true
       xvga     = hostpci.value.primary_gpu
