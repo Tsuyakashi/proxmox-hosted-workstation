@@ -64,27 +64,24 @@ Board: ASRock H81M-VG4 R2.0, UEFI P1.50
   GPU passthrough через `proxmox_hardware_mapping_pci`.
 - **`env/<name>`** — конкретные окружения, которые вызывают модуль с нужными
   параметрами (нода, CPU/RAM, GPU, ISO и т.д.):
-  - `env/windows` — Windows-рабочка, **владеет** cluster PCI-маппингами
-    (`manage_mappings = true`).
-  - `env/ubuntu` — Ubuntu 26.04 desktop, **только ссылается** на те же маппинги
-    по имени (`manage_mappings = false`).
+  - `env/windows` — Windows-рабочка.
+  - `env/ubuntu` — Ubuntu 26.04 desktop.
 
 Каждое окружение хранит своё состояние отдельно (S3 backend, ключ
 `<env>/terraform.tfstate`).
 
 **`env/windows` и `env/ubuntu` взаимоисключающие** — это одно и то же железо
-(GPU + USB-контроллеры + звук `bare-pve`). Одновременно применён/запущен может
-быть только один. `env/windows` должен оставаться `apply`-нутым (его VM может
-быть просто остановлена), т.к. он держит маппинги, на которые смотрит
-`env/ubuntu`. Переключение:
+(GPU + USB-контроллеры + звук `bare-pve`), и каждое из них создаёт cluster
+PCI-маппинги с одинаковыми именами (`manage_mappings = true` по умолчанию).
+Одновременно применён может быть только один. Переключение:
 
 ```bash
-terraform -chdir=env/windows apply   # VM 104 stopped, маппинги на месте
-terraform -chdir=env/ubuntu  apply   # поднимаем Ubuntu
-# обратно:
-terraform -chdir=env/ubuntu  destroy
-terraform -chdir=env/windows apply   # + qm start
+terraform -chdir=env/windows destroy
+terraform -chdir=env/ubuntu  apply
 ```
+
+Флаг `manage_mappings = false` в модуле оставлен для будущего варианта, когда
+маппинги вынесут в отдельный общий env.
 
 ### Провайдеры
 

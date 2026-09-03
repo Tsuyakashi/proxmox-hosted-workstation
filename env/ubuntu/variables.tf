@@ -28,7 +28,7 @@ variable "proxmox_api_token" {
 }
 
 variable "proxmox_root_password" {
-  description = "root@pam password. The proxmox.root alias creates no resources here (manage_mappings = false), but the provider is still configured, so a valid value is needed (the Vault wrapper supplies it)."
+  description = "root@pam password — needed to create the PCI hardware mappings (Vault wrapper supplies it)."
   type        = string
   sensitive   = true
 }
