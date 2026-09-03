@@ -109,8 +109,8 @@ variable "passthrough" {
   EOT
   type = list(object({
     name         = string
-    path         = string
-    id           = string
+    path         = optional(string) # required only when manage_mappings = true
+    id           = optional(string) # required only when manage_mappings = true
     subsystem_id = optional(string)
     iommu_group  = optional(number)
     primary_gpu  = optional(bool, false)
@@ -122,6 +122,17 @@ variable "passthrough" {
     condition     = length([for d in var.passthrough : d if d.primary_gpu]) <= 1
     error_message = "At most one passthrough entry may set primary_gpu = true."
   }
+}
+
+variable "manage_mappings" {
+  description = <<-EOT
+    Whether this module creates the cluster PCI hardware mappings (needs the
+    proxmox.root alias). Set false to only attach mappings that another env
+    already owns — the module then passes each passthrough entry's `name`
+    straight through as the hostpci mapping reference.
+  EOT
+  type        = bool
+  default     = true
 }
 
 variable "usb_devices" {

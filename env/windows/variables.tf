@@ -69,3 +69,14 @@ variable "os_type" {
   type    = string
   default = "win10"
 }
+
+variable "gpu_primary" {
+  description = <<-EOT
+    x-vga on the GTX 950. Keep false for the first Windows install (emulated std
+    VGA primary -> noVNC console works; OVMF has no GOP for this card so x-vga
+    would mean a blind install). Set true after Windows + the NVIDIA driver are
+    in -> primary display moves to the physical monitor.
+  EOT
+  type        = bool
+  default     = false
+}

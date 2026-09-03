@@ -1,4 +1,15 @@
-module "minimal_vm" {
+# Ubuntu 26.04 desktop workstation on bare-pve.
+#
+# This env owns the cluster PCI mappings (manage_mappings = true). env/windows
+# targets the same physical devices, so the two are MUTUALLY EXCLUSIVE — only
+# one may be applied at a time; whichever is applied owns the mappings.
+#
+# Booting: OVMF has no GOP for the GTX 950 (no UEFI vBIOS), so the physical
+# monitor stays dark through OVMF/GRUB. The in-tree nouveau driver lights it
+# up once KMS initialises — no Code 43 games, unlike Windows. Keyboard/mouse
+# come from the passed-through USB controllers.
+
+module "ubuntu_vm" {
   source    = "../../mod/vm"
   name      = var.vm_name
   node_name = var.proxmox_node
@@ -14,30 +25,21 @@ module "minimal_vm" {
   os_type        = var.os_type
   agent_enabled  = var.agent_enabled
   iso_file_id    = var.iso_file_id
-  disk_interface = "sata0"
-  disk_size      = 60
+  disk_interface = "scsi0"
+  disk_size      = 64
+  network_model  = "virtio"
 
-  # Whole-device passthrough for bare-pve: the entire GPU, all three USB
-  # controllers and the onboard audio go to the guest. Only storage (SATA,
-  # IOMMU group 9 — the PVE boot disk) and the Realtek NIC (group 10, vmbr0)
-  # stay with the host; guest networking is virtual.
-  #
-  # ids / subsystem-ids / groups verified on bare-pve:
-  #   lspci -nnk ; readlink -f /sys/bus/pci/devices/0000:<addr>/iommu_group
   passthrough = [
     {
       name         = "gtx950"
-      path         = "0000:01:00" # function-less -> forwards 01:00.0 (VGA) + 01:00.1 (audio)
+      path         = "0000:01:00"
       id           = "10de:1402"
       subsystem_id = "10de:1402"
       iommu_group  = 1
-      # false during first install so the emulated std VGA stays primary and the
-      # noVNC console works (OVMF has no GOP for this card). Flip true once
-      # Windows + the NVIDIA driver are installed -> output goes to the monitor.
-      primary_gpu = var.gpu_primary
+      primary_gpu  = true
     },
     {
-      name         = "usb-xhci" # USB 3.0, rear ports
+      name         = "usb-xhci"
       path         = "0000:00:14.0"
       id           = "8086:8c31"
       subsystem_id = "1849:8c31"
@@ -58,7 +60,7 @@ module "minimal_vm" {
       iommu_group  = 4
     },
     {
-      name         = "onboard-audio" # Intel HDA, line-out / mic jacks
+      name         = "onboard-audio"
       path         = "0000:00:1b.0"
       id           = "8086:8c20"
       subsystem_id = "1849:7662"
