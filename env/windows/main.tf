@@ -8,12 +8,14 @@ module "minimal_vm" {
     proxmox.root = proxmox.root
   }
 
-  cores         = var.cores
-  memory        = var.memory
-  mac           = var.mac
-  os_type       = var.os_type
-  agent_enabled = var.agent_enabled
-  iso_file_id   = var.iso_file_id
+  cores          = var.cores
+  memory         = var.memory
+  mac            = var.mac
+  os_type        = var.os_type
+  agent_enabled  = var.agent_enabled
+  iso_file_id    = var.iso_file_id
+  disk_interface = "sata0"
+  disk_size      = 60
 
   # Whole-device passthrough for bare-pve: the entire GPU, all three USB
   # controllers and the onboard audio go to the guest. Only storage (SATA,
@@ -29,7 +31,10 @@ module "minimal_vm" {
       id           = "10de:1402"
       subsystem_id = "10de:1402"
       iommu_group  = 1
-      primary_gpu  = true
+      # false during first install so the emulated std VGA stays primary and the
+      # noVNC console works (OVMF has no GOP for this card). Flip true once
+      # Windows + the NVIDIA driver are installed -> output goes to the monitor.
+      primary_gpu = var.gpu_primary
     },
     {
       name         = "usb-xhci" # USB 3.0, rear ports
