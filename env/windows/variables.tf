@@ -45,7 +45,19 @@ variable "cores" {
 
 variable "memory" {
   type    = number
-  default = 2048
+  default = 4096
+}
+
+variable "agent_enabled" {
+  description = "Enable QEMU guest agent channel. Flip to true only after virtio guest tools are installed in Windows."
+  type        = bool
+  default     = false
+}
+
+variable "iso_file_id" {
+  description = "Volume ID of the Windows install ISO already uploaded to the node."
+  type        = string
+  default     = "local:iso/Win10_22H2_Russian_x64v1.iso"
 }
 
 variable "mac" {

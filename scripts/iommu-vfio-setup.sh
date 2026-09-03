@@ -2,9 +2,23 @@
 set -euo pipefail
 
 # ============================================================
-# GPU Passthrough Setup Script (idempotent)
+# GPU / whole-workstation passthrough host setup (idempotent)
 # Target: Proxmox VE host, GRUB bootloader
 # ============================================================
+#
+# Binds to vfio-pci at boot:
+#   - the discrete GPU + its HDMI-audio function (always)
+#   - every USB controller that sits in an IOMMU group containing only USB
+#     controllers, plus the onboard HD-audio controller if it is alone in its
+#     group      -> only when WS_FULL_PASSTHROUGH=1 (default)
+#
+# The host is left with just storage + the NIC. Console access becomes
+# SSH / IPMI only — a local USB keyboard on the host will stop working.
+#
+#   ssh bare-pve 'bash -s' < scripts/iommu-vfio-setup.sh              # full
+#   ssh bare-pve 'WS_FULL_PASSTHROUGH=0 bash -s' < scripts/...        # GPU only
+
+WS_FULL_PASSTHROUGH="${WS_FULL_PASSTHROUGH:-1}"
 
 REBOOT_REQUIRED=false
 CHANGES_MADE=()
@@ -86,16 +100,58 @@ else
 fi
 
 # ------------------------------------------------------------
+# 3b. Extra whole-device passthrough (USB controllers + onboard audio)
+# ------------------------------------------------------------
+# A group is safe to hand over wholesale when every device in it is a USB
+# controller (class 0c03). The onboard HD-audio controller (class 0403) is
+# added when it is the only device in its group.
+EXTRA_IDS=""
+
+group_of() { basename "$(readlink -f "/sys/bus/pci/devices/0000:$1/iommu_group")"; }
+
+if [ "$WS_FULL_PASSTHROUGH" = "1" ]; then
+  declare -A SEEN_GROUP=()
+  while read -r addr _; do
+    [ -n "$addr" ] || continue
+    grp=$(group_of "$addr") || continue
+    [ -n "${SEEN_GROUP[$grp]:-}" ] && continue
+    SEEN_GROUP[$grp]=1
+
+    # class: 0x0c03xx = USB controller (UHCI/OHCI/EHCI/XHCI), 0x0403xx = audio
+    clean=1 kind=""
+    for d in /sys/kernel/iommu_groups/"$grp"/devices/*; do
+      c=$(cat "$d/class")
+      case "$c" in
+        0x0c03*) kind="usb" ;;
+        0x0403*) [ -z "$kind" ] && kind="audio" || clean=0 ;;
+        *) clean=0 ;;
+      esac
+    done
+    [ "$clean" = 1 ] || { echo "[extra] group $grp not clean, skipping"; continue; }
+
+    for d in /sys/kernel/iommu_groups/"$grp"/devices/*; do
+      da=$(basename "$d"); da=${da#0000:}
+      did=$(lspci -n -s "$da" | awk '{print $3}')
+      case ",$EXTRA_IDS,$GPU_IDS," in *",$did,"*) continue ;; esac
+      EXTRA_IDS="${EXTRA_IDS:+$EXTRA_IDS,}$did"
+      echo "[extra] group $grp ($kind): $da -> $did"
+    done
+  done < <(lspci -nn | grep -iE "USB controller|Audio device.*8086|High Definition Audio.*8086")
+fi
+
+ALL_IDS="$GPU_IDS${EXTRA_IDS:+,$EXTRA_IDS}"
+
+# ------------------------------------------------------------
 # 4. vfio-pci binding
 # ------------------------------------------------------------
 VFIO_CONF="/etc/modprobe.d/vfio.conf"
-VFIO_LINE="options vfio-pci ids=${GPU_IDS}"
+VFIO_LINE="options vfio-pci ids=${ALL_IDS}"
 
 if [ -f "$VFIO_CONF" ] && grep -qxF "$VFIO_LINE" "$VFIO_CONF"; then
   echo "[vfio-conf] Binding already present, skipping"
 else
   echo "$VFIO_LINE" > "$VFIO_CONF"
-  echo "[vfio-conf] Added binding: $GPU_IDS"
+  echo "[vfio-conf] Added binding: $ALL_IDS"
   CHANGES_MADE+=("vfio-pci binding")
   REBOOT_REQUIRED=true
 fi
@@ -125,7 +181,15 @@ SOFTDEP_CONF="/etc/modprobe.d/vfio-softdep.conf"
 SOFTDEP_LINES=(
   "softdep nvidia pre: vfio-pci"
   "softdep nouveau pre: vfio-pci"
+  "softdep nvidiafb pre: vfio-pci"
 )
+if [ "$WS_FULL_PASSTHROUGH" = "1" ]; then
+  SOFTDEP_LINES+=(
+    "softdep xhci_pci pre: vfio-pci"
+    "softdep ehci_pci pre: vfio-pci"
+    "softdep snd_hda_intel pre: vfio-pci"
+  )
+fi
 
 for line in "${SOFTDEP_LINES[@]}"; do
   if [ -f "$SOFTDEP_CONF" ] && grep -qxF "$line" "$SOFTDEP_CONF"; then
