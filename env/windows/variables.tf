@@ -27,11 +27,6 @@ variable "proxmox_api_token" {
   sensitive = true
 }
 
-variable "proxmox_root_password" {
-  type      = string
-  sensitive = true
-}
-
 variable "vm_name" {
   type    = string
   default = "windows-workstation"

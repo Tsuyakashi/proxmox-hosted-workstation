@@ -14,11 +14,6 @@ module "ubuntu_vm" {
   name      = var.vm_name
   node_name = var.proxmox_node
 
-  providers = {
-    proxmox      = proxmox
-    proxmox.root = proxmox.root
-  }
-
   cores          = var.cores
   memory         = var.memory
   mac            = var.mac

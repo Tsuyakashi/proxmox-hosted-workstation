@@ -26,9 +26,6 @@ _tfv_fetch_secrets() {
 
     echo "Fetching secrets from Vault (${VAULT_ADDR})..." >&2
 
-    TF_VAR_proxmox_root_password="$(vault kv get -field=pve-root-pass pve-workstation/api)" || return 1
-    export TF_VAR_proxmox_root_password
-
     TF_VAR_proxmox_api_token="$(vault kv get -field=api_token proxmox/terraform-provider)" || return 1
     export TF_VAR_proxmox_api_token
 

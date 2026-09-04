@@ -91,9 +91,10 @@ variable "os_type" {
 variable "passthrough" {
   description = <<-EOT
     Whole PCI devices to hand to the guest, in order — entry N becomes hostpciN.
-    Each device gets its own cluster hardware mapping (created via the root@pam
-    provider alias). Pass the function-less path ("0000:01:00") to forward every
-    function of a multi-function device (GPU + its HDMI audio, etc.).
+    Each device gets its own cluster hardware mapping (created via the token
+    provider — needs Mapping.Modify on its role). Pass the function-less path
+    ("0000:01:00") to forward every function of a multi-function device
+    (GPU + its HDMI audio, etc.).
 
       name         - hardware mapping alias (cluster-unique)
       path         - PCI path; function-less = all functions
@@ -126,10 +127,11 @@ variable "passthrough" {
 
 variable "manage_mappings" {
   description = <<-EOT
-    Whether this module creates the cluster PCI hardware mappings (needs the
-    proxmox.root alias). Set false to only attach mappings that another env
-    already owns — the module then passes each passthrough entry's `name`
-    straight through as the hostpci mapping reference.
+    Whether this module creates the cluster PCI hardware mappings (needs
+    Mapping.Modify on the provider token's role). Set false to only attach
+    mappings that another env already owns — the module then passes each
+    passthrough entry's `name` straight through as the hostpci mapping
+    reference.
   EOT
   type        = bool
   default     = true

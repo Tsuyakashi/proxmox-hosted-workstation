@@ -85,33 +85,35 @@ terraform -chdir=env/ubuntu  apply
 
 ### Провайдеры
 
-Используются **два** экземпляра провайдера `bpg/proxmox`:
-
-| Provider              | Auth                     | Назначение                                                             |
-|-----------------------|--------------------------|-------------------------------------------------------------------------|
-| `proxmox`              | API token (`terraform@pve`) | Все обычные ресурсы: VM, диски, сеть                                  |
-| `proxmox.root` (alias) | `root@pam` + пароль       | Только `proxmox_hardware_mapping_pci` — Proxmox API разрешает создание/изменение hardware mapping исключительно под root@pam (ограничение самого Proxmox, не провайдера) |
+Один экземпляр провайдера `bpg/proxmox`, аутентификация только API-токеном
+(`terraform@pve`) — для всех ресурсов, включая `proxmox_hardware_mapping_pci`.
+Root (`root@pam`) в проекте не используется вообще. Подробности и как это
+проверить — см. [Права токена Terraform](#права-токена-terraform).
 
 ## Структура репозитория
 
 ```
 proxmox-hosted-workstation/
 ├── env/
-│   └── windows/
+│   ├── windows/
+│   │   ├── backend.tf        # S3 (MinIO) backend
+│   │   ├── main.tf           # вызов модуля mod/vm
+│   │   ├── providers.tf      # провайдер: API token
+│   │   └── variables.tf
+│   └── ubuntu/
 │       ├── backend.tf        # S3 (MinIO) backend
 │       ├── main.tf           # вызов модуля mod/vm
-│       ├── providers.tf      # 2 провайдера: обычный + root-алиас
+│       ├── providers.tf      # провайдер: API token
 │       └── variables.tf
 ├── mod/
 │   └── vm/
 │       ├── main.tf           # ресурсы: VM + hardware_mapping_pci
 │       ├── outputs.tf
 │       ├── variables.tf
-│       └── versions.tf       # required_providers + configuration_aliases
+│       └── versions.tf       # required_providers
 ├── scripts/
 │   ├── iommu-vfio-setup.sh   # идемпотентная настройка хоста под GPU passthrough
-│   ├── apply-wrapper.sh      # обёртка terraform: тянет секреты из Vault
-│   └── vault-policy-init.sh  # инициализация Vault-политики для проекта
+│   └── apply-wrapper.sh      # обёртка terraform: тянет секреты из Vault
 ├── .gitignore
 └── README.md
 ```
@@ -119,7 +121,8 @@ proxmox-hosted-workstation/
 ## Требования
 
 - Terraform >= 1.16.1
-- Доступ к Proxmox VE API (токен) и к учётке `root@pam` (для hardware mapping)
+- Доступ к Proxmox VE API по токену (роль с `Mapping.Modify` + `Mapping.Use`,
+  см. [Права токена Terraform](#права-токена-terraform)) — root не требуется
 - HashiCorp Vault с настроенными секретами (см. [Секреты и Vault](#секреты-и-vault))
 - S3-совместимое хранилище для state (в проекте — MinIO)
 - Для GPU passthrough: хост с настроенным IOMMU/VFIO (см. ниже)
@@ -204,12 +207,9 @@ readlink -f /sys/bus/pci/devices/0000:<addr>/iommu_group   # iommu_group (пос
 и файлы состояния). Используется `scripts/apply-wrapper.sh`, который перед
 `terraform apply`/`plan` подтягивает из Vault:
 
-- `pve-workstation/api` → `TF_VAR_proxmox_root_password`
 - `proxmox/terraform-provider` → `TF_VAR_proxmox_api_token`
 - `proxmox/minio-credentials` → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
   (для S3 backend)
-
-Инициализация Vault-путей и политики — `scripts/vault-policy-init.sh`.
 
 Использование обёртки:
 
@@ -228,18 +228,35 @@ terraform plan
 terraform apply
 ```
 
-При первом запуске Terraform запросит `proxmox_root_password` (если не
-подтянут через Vault-обёртку).
-
 ### Права токена Terraform
 
-API-токену (`terraform@pve`), помимо стандартных VM-прав, требуется право
-`Mapping.Use` для запуска VM с уже созданным hardware mapping (создание
-самого mapping выполняется отдельно от `root@pam`, см. [Архитектура](#архитектура)).
-Право добавляется к уже существующей роли:
+Официальный README провайдера (bpg/proxmox, секция Known Issues) утверждает,
+что `hardware_mapping_pci` требует `root@pam` из-за IOMMU-специфики Proxmox
+API. На практике (провайдер `>= 0.111.1`, PVE `9.2.11`) это устарело: и
+создание, и использование маппинга работают на обычном API-токене — нужны
+только `Mapping.Modify` (создание/изменение маппинга) и `Mapping.Use`
+(привязка уже созданного маппинга к `hostpci` в VM). Роль на форуме Proxmox
+подтверждает разработчик (`Mapping.Modify`/`Mapping.Use` — рядовые
+привилегии, root не требуется концептуально); в актуальной странице
+`docs/` (Authentication → SSH Connection) `hardware_mapping_pci` тоже нет в
+списке операций, требующих SSH/root.
+
+Проверено эмпирически в этом проекте: `terraform apply`/`destroy` на
+изолированном тестовом ресурсе `proxmox_hardware_mapping_pci` через один
+токен (без root) — create и destroy оба прошли успешно.
+
+Право добавляется к уже существующей роли (append — `pveum role modify`
+перезаписывает список целиком, так что нужно передать весь текущий набор
+плюс новые права одной строкой):
 
 ```bash
-pveum role modify TerraformProv --privs "<существующие-права-через-запятую>,Mapping.Use"
+pveum role modify TerraformProv --privs "<существующие-права-через-запятую>,Mapping.Modify,Mapping.Use"
+```
+
+Проверить, что применилось:
+
+```bash
+pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "TerraformProv"'
 ```
 
 ## Переменные
@@ -252,7 +269,6 @@ pveum role modify TerraformProv --privs "<существующие-права-ч
 | `proxmox_endpoints`        | map(string) | —                            | Карта `нода → endpoint API`                 |
 | `proxmox_insecure`         | bool        | `true`                       | Пропускать проверку TLS-сертификата         |
 | `proxmox_api_token`        | string      | — (sensitive)                | API-токен `terraform@pve`                   |
-| `proxmox_root_password`    | string      | — (sensitive)                | Пароль `root@pam` (нужен только для mapping)|
 | `vm_name`                  | string      | `windows-workstation`        | Имя VM                                      |
 | `cores`                    | number      | `2`                          | Количество ядер CPU                         |
 | `memory`                   | number      | `4096`                       | RAM, МБ                                     |
@@ -260,6 +276,22 @@ pveum role modify TerraformProv --privs "<существующие-права-ч
 | `os_type`                  | string      | `win10`                      | Тип гостевой ОС (`win10`, `win11`, `l26`)   |
 | `agent_enabled`            | bool        | `false`                      | QEMU guest agent (включать после установки virtio-тулзов) |
 | `iso_file_id`              | string      | `local:iso/Win10_22H2_...`   | Volume ID установочного ISO                 |
+
+### `env/ubuntu`
+
+| Переменная               | Тип         | По умолчанию                          | Описание                          |
+|---------------------------|-------------|-----------------------------------------|-------------------------------------|
+| `proxmox_node`             | string      | `bare-pve`                              | Целевая нода Proxmox                |
+| `proxmox_endpoints`        | map(string) | —                                        | Карта `нода → endpoint API`         |
+| `proxmox_insecure`         | bool        | `true`                                   | Пропускать проверку TLS-сертификата |
+| `proxmox_api_token`        | string      | — (sensitive)                            | API-токен `terraform@pve`           |
+| `vm_name`                  | string      | `ubuntu-workstation`                     | Имя VM                              |
+| `cores`                    | number      | `4`                                      | Количество ядер CPU                 |
+| `memory`                   | number      | `8192`                                   | RAM, МБ                             |
+| `mac`                      | string      | `BC:24:11:AB:CD:01`                      | MAC-адрес (отличается от windows)   |
+| `os_type`                  | string      | `l26`                                    | Тип гостевой ОС                     |
+| `agent_enabled`            | bool        | `false`                                  | QEMU guest agent                    |
+| `iso_file_id`              | string      | `local:iso/ubuntu-26.04-desktop-amd64.iso` | Volume ID установочного ISO       |
 
 ### `mod/vm`
 
@@ -287,9 +319,6 @@ pveum role modify TerraformProv --privs "<существующие-права-ч
 
 ## Известные ограничения
 
-- **`proxmox_hardware_mapping_pci` доступен только под `root@pam`** — жёсткое
-  ограничение Proxmox API (взаимодействие с IOMMU), не решается выдачей ролей
-  обычному пользователю/токену. Отсюда — второй provider-alias в конфиге.
 - **`map` — это альтернативы по нодам, а не по функциям устройства** — одна
   запись на ноду; `path` без функции (`0000:01:00`) = «all functions». Две
   записи на одну ноду → Proxmox берёт только первую (был баг «чёрный монитор»:

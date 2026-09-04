@@ -5,16 +5,15 @@ moved {
   to   = proxmox_hardware_mapping_pci.this["gtx950"]
 }
 
-# One cluster-wide hardware mapping per passed-through device.
-# Creating/altering PCI mappings is restricted to root@pam by the Proxmox API
-# (IOMMU interaction), hence the proxmox.root provider alias.
+# One cluster-wide hardware mapping per passed-through device. Creating and
+# using these needs Mapping.Modify + Mapping.Use on the API token's role —
+# no root@pam required (despite the bpg README's "Known Issues" section,
+# which is stale for provider >= 0.111.1 / PVE 9.x).
 #
 # The mappings describe physical devices on the node, not this VM — set
 # manage_mappings = false in envs that only *consume* mappings another env
 # already owns (mutually-exclusive workstation VMs on the same hardware).
 resource "proxmox_hardware_mapping_pci" "this" {
-  provider = proxmox.root
-
   for_each = var.manage_mappings ? { for d in var.passthrough : d.name => d } : {}
 
   name = each.value.name
