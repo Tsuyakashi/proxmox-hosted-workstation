@@ -314,26 +314,43 @@ pveum role modify TerraformProv --privs "<существующие-права-ч
   ожидаемое поведение, не баг.
 - **GTX 950-эпохи железо на бюджетных платах** может не иметь в BIOS опций
   Above 4G Decoding / Resizable BAR — не блокер.
-- **Code 43 у NVIDIA-драйвера** — Proxmox сам добавляет `kvm=off` +
-  `hv_vendor_id` при `ostype = win10/win11` (видно в `qm showcmd`), так что
-  для Maxwell/Pascal обычно ничего делать не нужно. Если всё же вылезло —
-  `qm set <vmid> -args "-cpu host,kvm=off,hv_vendor_id=whatever,-hypervisor"`
-  на хосте (bpg-провайдер raw-`args` не поддерживает) или через hookscript.
 - **Монитор тёмный на экране OVMF** (primary GPU, `x-vga=1`) — подтверждено на
   GTX 950: `dmesg` даёт `vfio-pci 0000:01:00.0: No more image in the PCI ROM`,
   а sysfs-дамп ROM содержит **только legacy-образ** (codetype 0, ~58 КБ), без
-  UEFI GOP. OVMF без GOP не может зажечь монитор до загрузки ОС.
-  - Windows: чёрный экран через весь OVMF + раннюю загрузку, монитор
-    загорается только когда стартует драйвер NVIDIA (и то если пройден
-    Code 43).
-  - Linux (`env/ubuntu`): in-tree `nouveau` инициализирует карту из копии
-    vBIOS **на самой карте** (PROM-mirror, доступен даже когда PCI ROM BAR
-    пустой) — монитор загорается на этапе KMS, без Code 43. Это самый
-    быстрый способ проверить, что весь passthrough-тракт рабочий.
-  - Чтобы видеть и POST/OVMF: нужен полный UEFI-vBIOS (legacy + EFI-образ).
-    Скачать под конкретную карту (`10de:1402`) с TechPowerup, при наличии
-    проверить/срезать NVIDIA-хедер, положить в `/usr/share/kvm/gtx950.rom`,
-    выставить `rom_file = "gtx950.rom"` в записи `passthrough`.
+  UEFI GOP. OVMF без GOP не может зажечь монитор до загрузки ОС — но **как
+  только стартует драйвер (nouveau на Linux / NVIDIA на Windows), монитор
+  загорается**, оба выхода карты, 144 Гц, без Code 43. Проверено рабочим.
+  - Чтобы монитор работал уже на экране POST/OVMF/GRUB: нужен полный UEFI-vBIOS
+    (legacy + EFI-образ). Скачать под конкретную карту (`10de:1402`) с
+    TechPowerup, при наличии проверить/срезать NVIDIA-хедер, положить в
+    `/usr/share/kvm/gtx950.rom`, `rom_file = "gtx950.rom"` в записи `passthrough`.
+
+## Установка Windows с нуля
+
+OVMF без GOP => на экране установщика ничего не видно при `x-vga=1`. Порядок:
+
+1. `terraform -chdir=env/windows apply -var gpu_primary=false` — эмулированный
+   std VGA остаётся основным, работает веб-консоль Proxmox.
+2. Свежий `efidisk0` => OVMF висит в Boot Manager. Выбрать `UEFI QEMU DVD-ROM`
+   один раз — через веб-консоль или по serial:
+   `socat - UNIX-CONNECT:/var/run/qemu-server/<vmid>.serial0` (Enter → выбор →
+   пробел на «Press any key to boot from CD»).
+3. Windows: диск ≥ 60 ГБ (Setup отвергает 10 ГБ). Для локальной учётки без
+   пароля на 22H2 — отрубить сеть на шаге OOBE (`qm monitor` → `set_link net0
+   off`), после десктопа вернуть (`set_link net0 on`).
+4. Поставить драйвер NVIDIA (например
+   `curl.exe -L -o c:\nv.exe https://us.download.nvidia.com/Windows/580.97/580.97-desktop-win10-win11-64bit-international-dch-whql.exe`
+   → `c:\nv.exe -s -noreboot`; 580.xx — последняя ветка для Maxwell).
+5. `terraform -chdir=env/windows apply` (дефолт `gpu_primary = true`),
+   `qm stop <vmid> && qm start <vmid>` — вывод уходит на монитор.
+
+## Code 43
+
+Proxmox сам добавляет `kvm=off` + `hv_vendor_id` при `ostype = win10/win11`
+(видно в `qm showcmd`) — для Maxwell/Pascal этого хватает, драйвер 580.97
+ставится без Code 43. Если всё же вылезет —
+`qm set <vmid> -args "-cpu host,kvm=off,hv_vendor_id=whatever,-hypervisor"`
+(bpg-провайдер raw-`args` не поддерживает) или через hookscript.
 
 ## Заметки
 

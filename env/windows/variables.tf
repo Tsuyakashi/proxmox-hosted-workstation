@@ -39,13 +39,12 @@ variable "vm_name" {
 
 variable "cores" {
   type    = number
-  default = 2
+  default = 4
 }
-
 
 variable "memory" {
   type    = number
-  default = 4096
+  default = 8192
 }
 
 variable "agent_enabled" {
@@ -55,9 +54,13 @@ variable "agent_enabled" {
 }
 
 variable "iso_file_id" {
-  description = "Volume ID of the Windows install ISO already uploaded to the node."
+  description = <<-EOT
+    Volume ID of an ISO to mount in the (empty) CD drive. null keeps the drive
+    empty — set it back to "local:iso/Win10_22H2_Russian_x64v1.iso" only for a
+    from-scratch reinstall.
+  EOT
   type        = string
-  default     = "local:iso/Win10_22H2_Russian_x64v1.iso"
+  default     = null
 }
 
 variable "mac" {
@@ -72,11 +75,12 @@ variable "os_type" {
 
 variable "gpu_primary" {
   description = <<-EOT
-    x-vga on the GTX 950. Keep false for the first Windows install (emulated std
-    VGA primary -> noVNC console works; OVMF has no GOP for this card so x-vga
-    would mean a blind install). Set true after Windows + the NVIDIA driver are
-    in -> primary display moves to the physical monitor.
+    x-vga on the GTX 950 — primary display on the physical monitor(s).
+    Default true now that Windows + the NVIDIA driver are installed. Set to
+    false only for a from-scratch reinstall: OVMF has no GOP for this card, so
+    with x-vga the OVMF/installer screen is blind — you need the emulated std
+    VGA primary and the noVNC console until the NVIDIA driver is in.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
