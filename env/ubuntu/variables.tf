@@ -27,12 +27,6 @@ variable "proxmox_api_token" {
   sensitive = true
 }
 
-variable "proxmox_root_password" {
-  description = "root@pam password — needed to create the PCI hardware mappings (Vault wrapper supplies it)."
-  type        = string
-  sensitive   = true
-}
-
 variable "vm_name" {
   type    = string
   default = "ubuntu-workstation"
