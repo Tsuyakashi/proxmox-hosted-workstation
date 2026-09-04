@@ -39,13 +39,12 @@ variable "vm_name" {
 
 variable "cores" {
   type    = number
-  default = 2
+  default = 4
 }
-
 
 variable "memory" {
   type    = number
-  default = 4096
+  default = 8192
 }
 
 variable "agent_enabled" {
@@ -55,9 +54,13 @@ variable "agent_enabled" {
 }
 
 variable "iso_file_id" {
-  description = "Volume ID of the Windows install ISO already uploaded to the node."
+  description = <<-EOT
+    Volume ID of an ISO to mount in the (empty) CD drive. null keeps the drive
+    empty — set it back to "local:iso/Win10_22H2_Russian_x64v1.iso" only for a
+    from-scratch reinstall.
+  EOT
   type        = string
-  default     = "local:iso/Win10_22H2_Russian_x64v1.iso"
+  default     = null
 }
 
 variable "mac" {
