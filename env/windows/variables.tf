@@ -72,11 +72,12 @@ variable "os_type" {
 
 variable "gpu_primary" {
   description = <<-EOT
-    x-vga on the GTX 950. Keep false for the first Windows install (emulated std
-    VGA primary -> noVNC console works; OVMF has no GOP for this card so x-vga
-    would mean a blind install). Set true after Windows + the NVIDIA driver are
-    in -> primary display moves to the physical monitor.
+    x-vga on the GTX 950 — primary display on the physical monitor(s).
+    Default true now that Windows + the NVIDIA driver are installed. Set to
+    false only for a from-scratch reinstall: OVMF has no GOP for this card, so
+    with x-vga the OVMF/installer screen is blind — you need the emulated std
+    VGA primary and the noVNC console until the NVIDIA driver is in.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
