@@ -9,10 +9,9 @@ set -euo pipefail
 #       scripts/workstation-resume.service root@bare-pve:/root/
 #   ssh root@bare-pve 'cd /root && bash install-gpu-arbiter.sh'
 #
-# The bpg Terraform provider can only upload content_type=snippets over SSH
-# (upstream #2112 is wontfix), and this project is deliberately token-only /
-# no-SSH for Terraform — so the snippet is installed out of band here and
-# Terraform merely references `local:snippets/gpu-arbiter.sh`.
+# The hookscript can't come from Terraform: bpg uploads snippets only over SSH
+# (#2112 wontfix), and `hookscript:` on a guest config is root@pam-only in
+# Proxmox anyway. So it's installed + attached here, on the node.
 
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 SNIPPETS_DIR="${SNIPPETS_DIR:-/var/lib/vz/snippets}"
@@ -30,14 +29,17 @@ if [ -f "$SRC_DIR/workstation-resume.service" ]; then
   echo "[install] /etc/systemd/system/workstation-resume.service (enabled)"
 fi
 
-cat <<'EOF'
+# attach to both workstation VMs (idempotent)
+for name in windows-workstation ubuntu-workstation; do
+  vmid=$(grep -sl "^name: ${name}\$" /etc/pve/qemu-server/*.conf 2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//')
+  if [ -n "$vmid" ]; then
+    qm set "$vmid" --hookscript local:snippets/gpu-arbiter.sh >/dev/null
+    echo "[install] hookscript -> $name ($vmid)"
+  else
+    echo "[install] $name not created yet — re-run after 'terraform apply', or:"
+    echo "          qm set <vmid> --hookscript local:snippets/gpu-arbiter.sh"
+  fi
+done
 
-Next — attach the hookscript to the guests (Terraform does this via
-hook_script_file_id, or by hand):
-
-  pct set <ubuntu-ctid>  --hookscript local:snippets/gpu-arbiter.sh
-  qm  set <windows-vmid> --hookscript local:snippets/gpu-arbiter.sh   # optional
-
-Check:
-  /var/lib/vz/snippets/gpu-arbiter.sh status
-EOF
+echo
+echo "check:  /var/lib/vz/snippets/gpu-arbiter.sh status"

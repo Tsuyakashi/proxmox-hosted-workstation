@@ -27,7 +27,7 @@ variable "proxmox_api_token" {
   sensitive = true
 }
 
-variable "ct_name" {
+variable "vm_name" {
   type    = string
   default = "ubuntu-workstation"
 }
@@ -38,64 +38,47 @@ variable "cores" {
 }
 
 variable "memory" {
-  description = "RAM in MiB. Matches env/windows (they never run at the same time)."
+  description = "RAM in MiB. Matches env/windows — they never run at the same time."
   type        = number
   default     = 12288
 }
 
-variable "swap" {
-  type    = number
-  default = 0
-}
-
-variable "unprivileged" {
-  description = "Keep true; the GPU nodes come in at mode 0666. See mod/ct."
+variable "agent_enabled" {
+  description = "QEMU guest agent. Flip true after `apt install qemu-guest-agent` in the VM."
   type        = bool
-  default     = true
+  default     = false
 }
 
-variable "template_file_id" {
+variable "iso_file_id" {
   description = <<-EOT
-    LXC template volume id (a minimal rootfs tarball, not a cloud image).
-    On the node:
-      pveam update
-      pveam available --section system | grep ubuntu
-      pveam download local ubuntu-26.04-standard_26.04-1_amd64.tar.zst
-    Adjust the exact filename to whatever `pveam available` lists.
+    Ubuntu **desktop** ISO (not the server/live-server, not an LXC template).
+    Upload once: on the node,
+      cd /var/lib/vz/template/iso
+      wget https://releases.ubuntu.com/26.04/ubuntu-26.04-desktop-amd64.iso
+    then set it back to null after install to unmount the drive.
   EOT
   type        = string
-  default     = "local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst"
-}
-
-variable "disk_size" {
-  description = "rootfs GiB. A full GNOME + NVIDIA userspace + toolchain needs ~15 GiB; 40 leaves headroom."
-  type        = number
-  default     = 40
+  default     = "local:iso/ubuntu-26.04-desktop-amd64.iso"
 }
 
 variable "mac" {
-  description = "Differs from every other guest on vmbr0 (env/windows uses BC:24:11:F9:5D:82)."
+  description = "Must differ from every other VM on the bridge (env/windows uses BC:24:11:F9:5D:82)."
   type        = string
   default     = "BC:24:11:AB:CD:01"
 }
 
-variable "ipv4_address" {
-  description = "\"dhcp\" or a static CIDR."
-  type        = string
-  default     = "dhcp"
-}
-
-variable "ipv4_gateway" {
+variable "os_type" {
   type    = string
-  default = null
+  default = "l26"
 }
 
-variable "ssh_public_keys" {
-  description = "Authorized keys for root in the CT (console login also works via `pct enter`)."
-  type        = list(string)
-  default     = []
+variable "gpu_primary" {
+  description = <<-EOT
+    x-vga on the GTX 950 — primary display on the physical monitor(s).
+    Default true: nouveau lights the monitor at the installer's KMS init, so
+    unlike Windows there's no blind-install phase. Set false only if you want
+    the emulated VGA + noVNC console for some reason.
+  EOT
+  type        = bool
+  default     = true
 }
-
-# NOTE: hook_script_file_id and device_passthrough are intentionally NOT passed
-# to mod/ct here — Proxmox restricts both to root@pam, so the API token 403s.
-# scripts/lxc-ct-passthrough.sh sets them on the node as root instead.

@@ -1,60 +1,46 @@
-# Ubuntu desktop workstation on bare-pve — an LXC container, not a VM.
+# Ubuntu 26.04 desktop workstation on bare-pve — a VM with full passthrough,
+# exactly like env/windows. Goal: sit at the desk, picture on the monitors,
+# keyboard/mouse/USB passed through, play Steam games. NOT remote.
 #
-# Why a container:
-#   - No vfio, no OVMF, no Code 43, no "monitor dark until the driver loads".
-#     The CT shares the host's NVIDIA kernel driver; only the userspace driver
-#     (same version, --no-kernel-module) goes inside.
-#   - The GPU is handed in as plain device nodes (/dev/nvidia*, /dev/dri/*),
-#     so `terraform apply` no longer fights the host over PCI ownership.
+# Booting: OVMF has no GOP for the GTX 950 (no UEFI vBIOS), so the physical
+# monitor stays dark through OVMF/GRUB. The in-tree nouveau driver lights it
+# up the moment KMS initialises — no Code 43 games, unlike Windows — so the
+# installer IS visible on the monitor. Install the proprietary NVIDIA driver
+# inside the VM afterwards (scripts/ubuntu-guest-provision.sh); DKMS builds
+# against the VM's own Ubuntu kernel, none of the host-kernel weirdness.
 #
-# HARD REQUIREMENT — host must run the NVIDIA driver, NOT vfio-pci:
-#   This is the exact opposite of scripts/iommu-vfio-setup.sh. The GPU on
-#   bare-pve can be bound to vfio-pci (for env/windows) OR to nvidia (for this
-#   CT), never both. env/windows and env/ubuntu are mutually exclusive and
-#   NEITHER autostarts. The gpu-arbiter.sh hookscript (pre-start) rebinds the
-#   GPU/USB on `pct start` and aborts the start if the Windows VM is running;
-#   scripts/workstation.sh is the CLI on top. See README "Переключение ОС".
-#
-# The .tar.zst template is a standard minimal Ubuntu rootfs (NOT a cloud
-# image); ubuntu-desktop + the NVIDIA userspace driver are installed on first
-# boot by scripts/lxc-ubuntu-desktop-provision.sh (run inside the CT).
-#
-# DEVICE PASSTHROUGH + HOOKSCRIPT ARE NOT SET HERE. Proxmox hard-codes both
-# `dev[n]:` (device_passthrough) and `hookscript:` to root@pam only — no role
-# privilege grants them, so the API token this project uses gets HTTP 403.
-# Both are applied out of band as root on the node:
-#
-#   ssh bare-pve scripts/lxc-ct-passthrough.sh <ctid>
-#
-# which writes raw `lxc.*` GPU/DRI (+ USB/input/snd) lines and runs
-# `pct set <ctid> --hookscript local:snippets/gpu-arbiter.sh`. Re-run after any
-# `terraform apply` that recreates the CT.
+# env/windows owns the cluster PCI mappings (manage_mappings = true there);
+# this env only consumes them by name. The two are MUTUALLY EXCLUSIVE — same
+# GPU + USB controllers — and NEITHER autostarts. scripts/gpu-arbiter.sh (a
+# Proxmox pre-start hook) refuses to start one while the other runs;
+# scripts/workstation.sh is the CLI. Both guests want vfio-pci, so there is
+# no driver swap — just the "one at a time" lock.
 
-module "ubuntu_ct" {
-  source    = "../../mod/ct"
-  name      = var.ct_name
+module "ubuntu_vm" {
+  source    = "../../mod/vm"
+  name      = var.vm_name
   node_name = var.proxmox_node
 
-  cores            = var.cores
-  memory           = var.memory
-  swap             = var.swap
-  unprivileged     = var.unprivileged
-  template_file_id = var.template_file_id
-  os_type          = "ubuntu"
-  disk_size        = var.disk_size
-  mac              = var.mac
-  ipv4_address     = var.ipv4_address
-  ipv4_gateway     = var.ipv4_gateway
+  cores           = var.cores
+  memory          = var.memory
+  mac             = var.mac
+  os_type         = var.os_type
+  agent_enabled   = var.agent_enabled
+  iso_file_id     = var.iso_file_id
+  disk_interface  = "scsi0"
+  disk_size       = 64
+  network_model   = "virtio"
+  on_boot         = false
+  manage_mappings = false # env/windows creates the mappings; we attach by name
 
-  ssh_public_keys = var.ssh_public_keys
-
-  # Lifecycle is external (gpu-arbiter.sh pre-start hook + workstation.sh CLI).
-  start_on_boot = false
-
-  tags = ["workstation", "gpu", "ubuntu"]
-
-  # Only features.nesting is set here (all Terraform can do with a token).
-  # keyctl + fuse + the GPU/USB dev lines + the hookscript are added on the
-  # node by scripts/lxc-ct-passthrough.sh — all four are hard-coded root@pam
-  # in pve-container (verified in src/PVE/LXC.pm), no role grants them.
+  passthrough = [
+    {
+      name        = "gtx950"
+      primary_gpu = var.gpu_primary
+    },
+    { name = "usb-xhci" },
+    { name = "usb-ehci1" },
+    { name = "usb-ehci2" },
+    { name = "onboard-audio" },
+  ]
 }
