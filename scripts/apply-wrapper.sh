@@ -29,8 +29,8 @@ _tfv_fetch_secrets() {
     TF_VAR_proxmox_api_token="$(vault kv get -field=api_token proxmox/terraform-provider)" || return 1
     export TF_VAR_proxmox_api_token
 
-    AWS_ACCESS_KEY_ID="$(vault kv get -field=access_key proxmox/minio-credentials)" || return 1
-    AWS_SECRET_ACCESS_KEY="$(vault kv get -field=secret_key proxmox/minio-credentials)" || return 1
+    AWS_ACCESS_KEY_ID="$(vault kv get -field=access_key minio/credentials)" || return 1
+    AWS_SECRET_ACCESS_KEY="$(vault kv get -field=secret_key minio/credentials)" || return 1
     export AWS_ACCESS_KEY_ID
     export AWS_SECRET_ACCESS_KEY
 
