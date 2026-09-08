@@ -2,26 +2,26 @@
 set -euo pipefail
 
 # ============================================================
-# Wire host devices + the GPU arbiter hookscript into an LXC container.
-# Run on the Proxmox host as root. Idempotent.
+# Apply the root@pam-only bits of the Ubuntu workstation CT.
+# Run on the Proxmox node as root. Idempotent.
 #
 #   ssh bare-pve scripts/lxc-ct-passthrough.sh <ctid>
 #   ssh bare-pve scripts/lxc-ct-passthrough.sh <ctid> --no-usb
 #   ssh bare-pve scripts/lxc-ct-passthrough.sh <ctid> --remove
 #
-# WHY THIS IS NOT TERRAFORM: Proxmox restricts BOTH `dev[n]:` (device
-# passthrough) and `hookscript:` to root@pam — no role privilege grants them,
-# so the API token this project uses gets HTTP 403. Both are set here instead.
+# WHY NOT TERRAFORM: verified in pve-container src/PVE/LXC.pm — the following
+# are `raise_perm_exc(... only allowed for root@pam)` with NO privilege gate,
+# so the API token this project uses gets HTTP 403 no matter the role:
+#   - dev[n]        device passthrough        (LXC.pm:1710)
+#   - hookscript                              (LXC.pm:1761)
+#   - features flags other than `nesting`     (check_ct_modify_config_perm)
+# The node CLI (`pct set`) runs as root@pam, so it applies all of them.
+# Terraform still creates the CT + sets `nesting` (the one token-safe flag).
 #
-# What it does, into /etc/pve/lxc/<ctid>.conf:
-#   - GPU: exact cgroup2 allows + bind-mounts for /dev/nvidia*, /dev/nvidia-caps/*,
-#     /dev/dri/* (majors read live — nvidia-uvm's major is dynamic).
-#   - USB/input/sound (unless --no-usb): cgroup majors 189/13/116/166 +
-#     bind-mounts of /dev/bus/usb, /dev/input, /dev/snd  -> every USB device,
-#     hotplug included (a whole USB *controller* is PCI / VM-only).
-#   - hookscript: local:snippets/gpu-arbiter.sh
-#   - a host udev rule making usb/input/sound nodes 0666 (an unprivileged CT
-#     sees bind-mounted nodes as nobody:nogroup otherwise).
+# GPU device nodes go in via the NATIVE `pct set --devN` (Proxmox then handles
+# the cgroup allow + mount + unprivileged-CT node perms itself). The USB / input
+# / sound *directories* have no `dev[n]` equivalent, so those few lines are
+# appended to /etc/pve/lxc/<ctid>.conf raw (the classic pre-8.2 method).
 #
 # Re-run after any `terraform apply` that recreates the CT.
 # ============================================================
@@ -37,71 +37,92 @@ for a in "${@:2}"; do
   esac
 done
 
+FEATURES="${FEATURES:-nesting=1,keyctl=1,fuse=1}"
+HOOK="local:snippets/gpu-arbiter.sh"
 CONF="/etc/pve/lxc/${CTID}.conf"
 [ -f "$CONF" ] || { echo "error: $CONF not found (is the CT created?)" >&2; exit 1; }
-HOOK="local:snippets/gpu-arbiter.sh"
 
-BEGIN="# --- workstation passthrough (lxc-ct-passthrough.sh) ---"
-END="# --- end workstation passthrough ---"
+GPU_NODES=(/dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools
+           /dev/dri/card0 /dev/dri/renderD128)
+for n in /dev/nvidia-caps/nvidia-cap*; do [ -e "$n" ] && GPU_NODES+=("$n"); done
 
-# --- build the managed block --------------------------------------------
-emit_dev() { # $1 = device node path -> cgroup allow + bind mount, by live major:minor
-  local n=$1 mm maj min
-  [ -e "$n" ] || { echo "#   (skip, absent) $n"; return; }
-  mm=$(stat -c '%t %T' "$n")           # hex major minor
-  maj=$((16#${mm% *})); min=$((16#${mm#* }))
-  echo "lxc.cgroup2.devices.allow: c ${maj}:${min} rwm"
-  echo "lxc.mount.entry: ${n} ${n#/} none bind,optional,create=file 0 0"
-}
+BEGIN="# --- workstation usb/input/snd passthrough (lxc-ct-passthrough.sh) ---"
+END="# --- end workstation usb/input/snd passthrough ---"
 
-build_block() {
-  echo "$BEGIN"
-  echo "# GPU"
-  local n
-  for n in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools; do emit_dev "$n"; done
-  for n in /dev/nvidia-caps/*; do emit_dev "$n"; done
-  for n in /dev/dri/card* /dev/dri/renderD*; do emit_dev "$n"; done
-  if [ "$WITH_USB" = 1 ]; then
-    echo "# USB (189) / input (13) / ALSA (116) / usb-ACM (166)"
-    echo "lxc.cgroup2.devices.allow: c 189:* rwm"
-    echo "lxc.cgroup2.devices.allow: c 13:* rwm"
-    echo "lxc.cgroup2.devices.allow: c 116:* rwm"
-    echo "lxc.cgroup2.devices.allow: c 166:* rwm"
-    echo "lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir 0 0"
-    echo "lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir 0 0"
-    echo "lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0"
-  fi
-  echo "$END"
-}
-
-# --- rewrite the conf (exact-line strip of any old block, no regex) -----
-tmp=$(mktemp)
-awk -v b="$BEGIN" -v e="$END" '
-  $0==b { drop=1 } drop==0 { print } $0==e { drop=0 }
-' "$CONF" >"$tmp"
-[ "$MODE" = add ] && build_block >>"$tmp"
-
-if cmp -s "$tmp" "$CONF"; then
-  echo "[conf] $CONF already current"
-else
-  cat "$tmp" >"$CONF"; echo "[conf] ${MODE}: updated $CONF"
+pct_running() { pct status "$CTID" 2>/dev/null | grep -q running; }
+if pct_running; then
+  echo "note: CT $CTID is running — changes apply on its next start" >&2
 fi
-rm -f "$tmp"
 
-# --- hookscript (root@pam only) ----------------------------------------
+# ------------------------------------------------------------
+# 1. GPU device nodes -> native `pct set --devN`
+# ------------------------------------------------------------
+# Wipe any devN we manage, then re-add. (Proxmox has no "list my devN", so we
+# clear a generous range and rebuild deterministically from index 0.)
+if [ "$MODE" = add ]; then
+  DEL=(); for i in $(seq 0 31); do grep -q "^dev${i}:" "$CONF" && DEL+=("dev${i}"); done
+  [ "${#DEL[@]}" -gt 0 ] && pct set "$CTID" --delete "$(IFS=,; echo "${DEL[*]}")" >/dev/null || true
+  i=0
+  for n in "${GPU_NODES[@]}"; do
+    [ -e "$n" ] || { echo "  skip (absent): $n"; continue; }
+    pct set "$CTID" "--dev${i}" "${n},mode=0666" >/dev/null
+    echo "  dev${i} = ${n}"
+    i=$((i + 1))
+  done
+else
+  DEL=(); for i in $(seq 0 31); do grep -q "^dev${i}:" "$CONF" && DEL+=("dev${i}"); done
+  [ "${#DEL[@]}" -gt 0 ] && pct set "$CTID" --delete "$(IFS=,; echo "${DEL[*]}")" >/dev/null || true
+  echo "  removed all devN"
+fi
+
+# ------------------------------------------------------------
+# 2. features (keyctl/fuse — nesting is already set by Terraform)
+# ------------------------------------------------------------
+if [ "$MODE" = add ]; then
+  pct set "$CTID" --features "$FEATURES" >/dev/null
+  echo "  features = $FEATURES"
+else
+  pct set "$CTID" --features nesting=1 >/dev/null || true
+  echo "  features = nesting=1"
+fi
+
+# ------------------------------------------------------------
+# 3. hookscript
+# ------------------------------------------------------------
 if [ "$MODE" = add ]; then
   if [ -f /var/lib/vz/snippets/gpu-arbiter.sh ]; then
-    pct set "$CTID" --hookscript "$HOOK"
-    echo "[hook] pct set $CTID --hookscript $HOOK"
+    pct set "$CTID" --hookscript "$HOOK" >/dev/null
+    echo "  hookscript = $HOOK"
   else
-    echo "[hook] WARNING: /var/lib/vz/snippets/gpu-arbiter.sh missing — run install-gpu-arbiter.sh"
+    echo "  WARNING: /var/lib/vz/snippets/gpu-arbiter.sh missing — run install-gpu-arbiter.sh"
   fi
 else
-  pct set "$CTID" --delete hookscript 2>/dev/null || true
-  echo "[hook] removed"
+  pct set "$CTID" --delete hookscript >/dev/null 2>&1 || true
+  echo "  hookscript removed"
 fi
 
-# --- host udev perms for the unprivileged CT ---------------------------
+# ------------------------------------------------------------
+# 4. USB / input / sound directories (no dev[n] equivalent) -> raw lxc.*
+# ------------------------------------------------------------
+tmp=$(mktemp)
+awk -v b="$BEGIN" -v e="$END" '$0==b{drop=1} drop==0{print} $0==e{drop=0}' "$CONF" >"$tmp"
+if [ "$MODE" = add ] && [ "$WITH_USB" = 1 ]; then
+  cat >>"$tmp" <<EOF
+$BEGIN
+lxc.cgroup2.devices.allow: c 189:* rwm
+lxc.cgroup2.devices.allow: c 13:* rwm
+lxc.cgroup2.devices.allow: c 116:* rwm
+lxc.cgroup2.devices.allow: c 166:* rwm
+lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir 0 0
+lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir 0 0
+lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0
+$END
+EOF
+fi
+cmp -s "$tmp" "$CONF" || { cat "$tmp" >"$CONF"; echo "  usb/input/snd raw lxc.*: ${MODE}"; }
+rm -f "$tmp"
+
+# host udev perms — an unprivileged CT sees bind-mounted nodes as nobody:nogroup
 UDEV=/etc/udev/rules.d/99-lxc-workstation-perms.rules
 if [ "$MODE" = add ] && [ "$WITH_USB" = 1 ]; then
   cat >"$UDEV" <<'EOF'
@@ -111,10 +132,10 @@ SUBSYSTEM=="sound", MODE="0666"
 KERNEL=="ttyACM[0-9]*", MODE="0666"
 EOF
   udevadm control --reload && udevadm trigger
-  echo "[udev] wrote $UDEV"
+  echo "  udev: $UDEV"
 elif [ "$MODE" = remove ] && [ -f "$UDEV" ]; then
-  rm -f "$UDEV"; udevadm control --reload || true; echo "[udev] removed $UDEV"
+  rm -f "$UDEV"; udevadm control --reload || true; echo "  udev: removed"
 fi
 
 echo ""
-echo ">>> restart the CT:  pct reboot $CTID   (or: workstation.sh start ubuntu)"
+echo ">>> (re)start the CT:  pct reboot $CTID   or   workstation.sh start ubuntu"

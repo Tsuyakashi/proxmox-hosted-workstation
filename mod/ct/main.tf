@@ -1,21 +1,23 @@
 # Generic Proxmox LXC container module.
 #
-# Counterpart of mod/vm. Where mod/vm hands whole PCI functions to a guest via
-# vfio-pci hardware mappings, this module shares individual host device nodes
-# (`device_passthrough` -> Proxmox `dev[n]:`) into a container that runs on the
-# host kernel. The two approaches to the same GPU are MUTUALLY EXCLUSIVE at the
-# host level: vfio-pci binding (mod/vm) vs. the host NVIDIA driver being loaded
-# (this module). Switching is a host reconfigure + reboot, not just a
-# `terraform apply` — see scripts/lxc-nvidia-host-setup.sh.
+# Counterpart of mod/vm. mod/vm hands whole PCI functions to a guest via
+# vfio-pci hardware mappings; a container instead runs on the host kernel and
+# gets individual host device nodes. Those nodes (`dev[n]:`), the hookscript,
+# and every feature flag except `nesting` are hard-coded root@pam in Proxmox,
+# so this module only does what an API token can — the rest is applied on the
+# node by scripts/lxc-ct-passthrough.sh.
+#
+# The two approaches to the same GPU are MUTUALLY EXCLUSIVE at the host level:
+# vfio-pci binding (mod/vm) vs. the host NVIDIA driver (this module). The flip
+# is a live PCI rebind by scripts/gpu-arbiter.sh — no reboot.
 
 resource "proxmox_virtual_environment_container" "this" {
   node_name     = var.node_name
   vm_id         = var.vm_id
   unprivileged  = var.unprivileged
   start_on_boot = var.start_on_boot
+  started       = var.started
   tags          = var.tags
-
-  hook_script_file_id = var.hook_script_file_id
 
   operating_system {
     template_file_id = var.template_file_id
@@ -69,28 +71,20 @@ resource "proxmox_virtual_environment_container" "this" {
     }
   }
 
+  # Proxmox only lets a non-root@pam token touch `nesting` (and only on an
+  # unprivileged CT — see check_ct_modify_config_perm in pve-container). Every
+  # other feature flag — keyctl, fuse, mount — raises a 403 for the token
+  # ("changing feature flags (except nesting) is only allowed for root@pam").
+  # Those are applied on the node by scripts/lxc-ct-passthrough.sh, together
+  # with the dev[n] / hookscript bits that are also hard-coded root@pam only.
   features {
     nesting = var.nesting
-    keyctl  = var.keyctl
-    fuse    = var.fuse
-    mount   = var.mount_feature
   }
 
   dynamic "startup" {
     for_each = var.startup_order == null ? [] : [var.startup_order]
     content {
       order = startup.value
-    }
-  }
-
-  dynamic "device_passthrough" {
-    for_each = { for d in var.device_passthrough : d.path => d }
-    content {
-      path       = device_passthrough.value.path
-      mode       = device_passthrough.value.mode
-      deny_write = device_passthrough.value.deny_write
-      uid        = device_passthrough.value.uid
-      gid        = device_passthrough.value.gid
     }
   }
 
@@ -108,8 +102,10 @@ resource "proxmox_virtual_environment_container" "this" {
   }
 
   lifecycle {
-    # The template tarball is only read at create time; a newer template in the
-    # same volume id must not trigger a destroy/recreate of a live workstation.
-    ignore_changes = [operating_system[0].template_file_id]
+    # template: only read at create time — a newer tarball at the same volume id
+    #   must not destroy/recreate a live workstation.
+    # started: the arbiter / workstation.sh own run state after the first create;
+    #   Terraform must not stop or start the CT on later applies.
+    ignore_changes = [operating_system[0].template_file_id, started]
   }
 }

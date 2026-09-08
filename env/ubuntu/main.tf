@@ -53,6 +53,8 @@ module "ubuntu_ct" {
 
   tags = ["workstation", "gpu", "ubuntu"]
 
-  # nesting/keyctl/fuse default true in the module — a GNOME session, gdm and
-  # Flatpak all need them. GPU/USB/hookscript: see the header + lxc-ct-passthrough.sh.
+  # Only features.nesting is set here (all Terraform can do with a token).
+  # keyctl + fuse + the GPU/USB dev lines + the hookscript are added on the
+  # node by scripts/lxc-ct-passthrough.sh — all four are hard-coded root@pam
+  # in pve-container (verified in src/PVE/LXC.pm), no role grants them.
 }

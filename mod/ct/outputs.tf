@@ -12,6 +12,3 @@ output "ipv4" {
   value       = proxmox_virtual_environment_container.this.ipv4
 }
 
-output "passed_devices" {
-  value = [for d in proxmox_virtual_environment_container.this.device_passthrough : d.path]
-}

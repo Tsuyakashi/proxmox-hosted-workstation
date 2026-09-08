@@ -33,9 +33,18 @@ variable "swap" {
 variable "unprivileged" {
   description = <<-EOT
     Unprivileged container (root maps to an unprivileged host uid). Keep true —
-    GPU device nodes are handed in with mode 0666 via `device_passthrough`, which
-    is enough for an unprivileged CT to open them. Flip to false only if some
-    device stubbornly needs a real root owner inside the CT.
+    GPU device nodes come in at mode 0666 (see scripts/lxc-ct-passthrough.sh),
+    enough for an unprivileged CT to open them.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "started" {
+  description = <<-EOT
+    Whether Terraform starts the CT after create. `started` is in
+    ignore_changes, so this only applies on the first create — afterwards
+    scripts/gpu-arbiter.sh + workstation.sh own run state.
   EOT
   type        = bool
   default     = true
@@ -105,27 +114,15 @@ variable "search_domain" {
 }
 
 variable "nesting" {
-  description = "features.nesting — required for systemd, a display manager and nested containers/flatpak inside the CT."
+  description = <<-EOT
+    features.nesting — required for systemd, a display manager and nested
+    containers/flatpak inside the CT. The ONLY feature flag an API token may
+    set (and only on an unprivileged CT); keyctl / fuse / features.mount are
+    hard-coded root@pam in pve-container, so set those on the node with
+    scripts/lxc-ct-passthrough.sh instead.
+  EOT
   type        = bool
   default     = true
-}
-
-variable "keyctl" {
-  description = "features.keyctl — systemd user sessions / gnome-keyring want it."
-  type        = bool
-  default     = true
-}
-
-variable "fuse" {
-  description = "features.fuse — AppImage, gvfs, some Flatpak runtimes."
-  type        = bool
-  default     = true
-}
-
-variable "mount_feature" {
-  description = "features.mount — filesystem types the CT may mount itself (e.g. [\"nfs\", \"cifs\"])."
-  type        = list(string)
-  default     = []
 }
 
 variable "start_on_boot" {
@@ -157,37 +154,10 @@ variable "password" {
   sensitive   = true
 }
 
-variable "hook_script_file_id" {
-  description = "Volume id of a Proxmox hookscript (snippets), e.g. local:snippets/ct-hook.sh."
-  type        = string
-  default     = null
-}
-
-variable "device_passthrough" {
-  description = <<-EOT
-    Host device nodes to expose inside the CT (Proxmox `dev[n]:` entries — the
-    LXC analogue of PCI passthrough: no vfio, the CT shares the host kernel
-    driver). For an NVIDIA GPU the host must be running the NVIDIA driver (NOT
-    vfio-pci) so these nodes exist:
-
-      /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools
-      /dev/nvidia-modeset /dev/dri/card0 /dev/dri/renderD128
-
-      path       - absolute host path to the device node
-      mode       - octal perms Proxmox sets on the in-CT node (0666 lets an
-                   unprivileged CT open it without idmap games)
-      deny_write - read-only exposure
-      uid / gid  - owner of the in-CT node (CT-namespace ids)
-  EOT
-  type = list(object({
-    path       = string
-    mode       = optional(string, "0666")
-    deny_write = optional(bool, false)
-    uid        = optional(number)
-    gid        = optional(number)
-  }))
-  default = []
-}
+# NOTE: no `hook_script_file_id` / `device_passthrough` variables — Proxmox
+# hard-codes `hookscript:` and `dev[n]:` to root@pam (pve-container
+# src/PVE/LXC.pm), so an API token can never set them. Both are applied on the
+# node by scripts/lxc-ct-passthrough.sh (`pct set --devN` / `--hookscript`).
 
 variable "mount_points" {
   description = <<-EOT
