@@ -208,7 +208,7 @@ readlink -f /sys/bus/pci/devices/0000:<addr>/iommu_group   # iommu_group (пос
 `terraform apply`/`plan` подтягивает из Vault:
 
 - `proxmox/terraform-provider` → `TF_VAR_proxmox_api_token`
-- `proxmox/minio-credentials` → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+- `minio/credentials` → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
   (для S3 backend)
 
 Использование обёртки:
