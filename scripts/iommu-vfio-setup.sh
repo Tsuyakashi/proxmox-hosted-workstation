@@ -166,8 +166,7 @@ fi
 # 5. Blacklist conflicting drivers
 # ------------------------------------------------------------
 BLACKLIST_CONF="/etc/modprobe.d/blacklist.conf"
-# nova_core = the in-tree Rust NVIDIA driver (kernel 7.0+) — also grabs the card
-BLACKLIST_MODULES=("nouveau" "nvidia" "nvidiafb" "nova_core")
+BLACKLIST_MODULES=("nouveau" "nvidia" "nvidiafb")
 
 for module in "${BLACKLIST_MODULES[@]}"; do
   LINE="blacklist $module"
