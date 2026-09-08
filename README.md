@@ -19,6 +19,7 @@ Terraform-конфигурация для развёртывания рабоч�
 - [Структура репозитория](#структура-репозитория)
 - [Требования](#требования)
 - [Настройка хоста (GPU passthrough)](#настройка-хоста-gpu-passthrough)
+- [Переключение ОС (lock)](#переключение-ос-lock)
 - [Секреты и Vault](#секреты-и-vault)
 - [Использование](#использование)
 - [Переменные](#переменные)
@@ -86,30 +87,29 @@ Board: ASRock H81M-VG4 R2.0, UEFI P1.50
 
 ### `env/windows` и `env/ubuntu` взаимоисключающи
 
-Это одно и то же железо (GPU `bare-pve`), и на **уровне хоста** карту нельзя
-одновременно отдать в vfio-pci и в драйвер NVIDIA:
+Это одно и то же железо (GPU + USB-контроллеры `bare-pve`), и его нельзя
+одновременно отдать в `vfio-pci` (VM) и в родные драйверы + `nvidia` (LXC):
 
 | | `env/windows` (VM) | `env/ubuntu` (LXC) |
 |---|---|---|
-| GPU привязан к | `vfio-pci` | драйвер `nvidia` на хосте |
-| Подготовка хоста | `scripts/iommu-vfio-setup.sh` | `scripts/lxc-nvidia-host-setup.sh` |
-| blacklist | `nouveau`, `nvidia`, `nvidiafb` | `nouveau` |
+| GPU `01:00.0` | `vfio-pci` | `nvidia` |
+| HDMI-audio `01:00.1` | `vfio-pci` | `snd_hda_intel` (звук в CT через `/dev/snd`) |
+| USB-контроллеры | `vfio-pci` (целые PCI-функции) | `xhci_pci`/`ehci-pci` + `/dev/bus/usb` в CT |
+| Первичная подготовка хоста | `scripts/iommu-vfio-setup.sh` | `scripts/lxc-nvidia-host-setup.sh` |
+| RAM | 12 ГБ | 12 ГБ |
 
-Переключение — это **реконфигурация хоста + reboot**, а не только `terraform`:
+**Обе гостевые ОС по умолчанию выключены** (`on_boot=false` /
+`start_on_boot=false`) — на буте они не гонятся за картой. Жизненным циклом
+управляет `scripts/workstation.sh` (см.
+[Переключение ОС](#переключение-ос-lock)): единственный триггер — `start`, он
+берёт lock, отказывает если запущена другая ОС, живьём перепривязывает
+GPU + USB под нужный режим и стартует гостя. Остановка одной ОС **не** запускает
+другую.
 
-```bash
-# VM -> LXC
-ssh bare-pve 'NVIDIA_VERSION=580.xx.xx bash -s' < scripts/lxc-nvidia-host-setup.sh
-ssh bare-pve reboot
-terraform -chdir=env/windows destroy   # снять VM и её маппинги
-terraform -chdir=env/ubuntu  apply
-
-# LXC -> VM: в обратную сторону через iommu-vfio-setup.sh
-```
-
-> Архитектурный вопрос «как контейнер отдаёт картинку» (физический монитор +
-> локальные KB/M vs. headless + RDP/Sunshine) пока открыт — `env/ubuntu`
-> пробрасывает GPU/DRI-ноды, а строки `/dev/input/*` в `main.tf` закомментированы.
+> Архитектурный вопрос «как контейнер отдаёт картинку» (физический монитор vs.
+> headless + RDP/Sunshine) пока открыт — `env/ubuntu` пробрасывает GPU/DRI +
+> весь `/dev/input`, дисплейный сервер настраивается в
+> `scripts/lxc-ubuntu-desktop-provision.sh`.
 > `mod/vm.manage_mappings = false` остаётся для будущего общего env с маппингами.
 
 ### Провайдеры
@@ -146,9 +146,12 @@ proxmox-hosted-workstation/
 │       ├── variables.tf
 │       └── versions.tf
 ├── scripts/
-│   ├── iommu-vfio-setup.sh              # хост -> vfio-pci (для env/windows)
-│   ├── lxc-nvidia-host-setup.sh         # хост -> драйвер nvidia (для env/ubuntu)
+│   ├── iommu-vfio-setup.sh              # хост -> vfio-pci (первичная подготовка, env/windows)
+│   ├── lxc-nvidia-host-setup.sh         # хост -> драйвер nvidia (первичная подготовка, env/ubuntu)
 │   ├── lxc-ubuntu-desktop-provision.sh  # внутри CT: ubuntu-desktop + userspace NVIDIA
+│   ├── lxc-usb-passthrough.sh           # весь /dev/bus/usb + /dev/input + /dev/snd в CT
+│   ├── workstation.sh                   # lock + live-своп GPU/USB + start/stop одной ОС
+│   ├── workstation-resume.service       # systemd: до-switch после reboot (--via-reboot)
 │   └── apply-wrapper.sh                 # обёртка terraform: тянет секреты из Vault
 ├── .gitignore
 └── README.md
@@ -241,16 +244,17 @@ nvidia-smi            # видит GTX 950
 ls -l /dev/nvidia* /dev/dri
 ```
 
-Дальше — `terraform -chdir=env/ubuntu apply`, затем внутри контейнера:
+Дальше — полный порядок в
+[Установка Ubuntu с нуля (LXC)](#установка-ubuntu-с-нуля-lxc): `terraform apply`
+→ `lxc-usb-passthrough.sh` → `workstation.sh start ubuntu` →
+`lxc-ubuntu-desktop-provision.sh` внутри CT (ставит `ubuntu-desktop-minimal` из
+обычного архива, опционально `xrdp`, и **userspace-половину** того же драйвера
+NVIDIA — `--no-kernel-module`, модуль ядра приходит с хоста, версия обязана
+совпадать).
 
-```bash
-pct push <ctid> scripts/lxc-ubuntu-desktop-provision.sh /root/provision.sh
-pct exec <ctid> -- env NVIDIA_VERSION=580.xx.xx bash /root/provision.sh
-```
-
-Скрипт ставит `ubuntu-desktop-minimal` из обычного архива (не cloud-образ),
-опционально `xrdp`, и **userspace-половину** того же драйвера NVIDIA
-(`--no-kernel-module` — модуль ядра приходит с хоста, версия обязана совпадать).
+> `lxc-nvidia-host-setup.sh` делает разовую подготовку (persistent-конфиг под
+> первый режим). Дальнейшие переключения vfio-pci ↔ nvidia — уже
+> `workstation.sh`, без reboot.
 
 ### PCI hardware mapping в Proxmox (режим A)
 
@@ -282,6 +286,72 @@ lspci -vnn -s <addr> | grep -i subsystem                   # subsystem_id
 readlink -f /sys/bus/pci/devices/0000:<addr>/iommu_group   # iommu_group (последний сегмент пути)
 ```
 
+## Переключение ОС (lock)
+
+`env/windows` (VM) и `env/ubuntu` (LXC) делят один GPU и один комплект
+USB-контроллеров. `scripts/workstation.sh` — единственная точка управления
+жизненным циклом; выполняется на хосте под root.
+
+### Модель
+
+- Обе гостевые ОС по умолчанию **выключены** (`on_boot=false` в `mod/vm`,
+  `start_on_boot=false` в `env/ubuntu`). На буте гонки за карту нет.
+- Остановка одной ОС **никогда** не запускает другую. Ничего не сцепляется
+  автоматически. Валидное состояние по умолчанию — «обе выключены».
+- Единственный триггер — `start <guest>`. Он:
+  1. берёт `flock` (`/run/lock/workstation.lock`) — свопы сериализуются;
+  2. **отказывает**, если запущена другая ОС (`--force` — сначала погасить её);
+  3. смотрит, какой драйвер сейчас держит GPU (`.../0000:01:00.0/driver`);
+  4. если это не режим цели — **живьём** перепривязывает GPU + HDMI-audio +
+     USB-функции (`driver_override` + `unbind` + `drivers_probe`);
+  5. стартует гостя (`qm start` / `pct start`).
+
+### Команды
+
+```bash
+ssh bare-pve scripts/workstation.sh status                  # режим хоста, гости, привязки PCI
+ssh bare-pve scripts/workstation.sh start  ubuntu           # своп при необходимости -> pct start
+ssh bare-pve scripts/workstation.sh start  windows --force  # погасить ubuntu -> своп -> qm start
+ssh bare-pve scripts/workstation.sh stop                    # погасить всё, НИЧЕГО не стартовать
+ssh bare-pve scripts/workstation.sh switch ubuntu           # только своп драйверов (обе ОС должны стоять)
+```
+
+Типичный цикл (ровно то, что нужно):
+
+```
+stop windows  ->  (карта осталась на vfio-pci)  ->  start ubuntu
+   |                                                      |
+   |  workstation.sh видит host_mode=windows != ubuntu    |
+   |  и живьём перекидывает GPU vfio-pci -> nvidia,        |
+   v  USB vfio-pci -> xhci_pci, затем pct start            v
+ обе off  <----------------  stop ubuntu  <----------------  ubuntu up
+```
+
+### Живой своп vs. reboot
+
+Перепривязка `vfio-pci <-> nvidia` в рантайме работает, когда устройство никто
+не держит (гость остановлен, нет `nvidia-persistenced`/Xorg на хосте — скрипт
+сам гасит persistenced). Если устройство занято — `start`/`switch` печатает
+инструкцию и вариант через перезагрузку:
+
+```bash
+ssh bare-pve scripts/workstation.sh switch ubuntu --via-reboot
+```
+
+Это пишет `/var/lib/workstation/pending-start` и перезагружает ноду;
+`workstation-resume.service` после бута (когда карту ещё никто не держит)
+до-выполняет `start ubuntu`. Установка юнита:
+
+```bash
+install -m 0755 scripts/workstation.sh          /usr/local/sbin/workstation.sh
+install -m 0644 scripts/workstation-resume.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable workstation-resume.service
+```
+
+> Cluster-маппинги `proxmox_hardware_mapping_pci` при свопе **не трогаются** —
+> это просто метаданные, Proxmox сверяет их только при старте VM. «Свап
+> маппинга» на практике = смена драйвера PCI-функций на хосте.
+
 ## Секреты и Vault
 
 Секреты не хранятся в репозитории (`.gitignore` исключает `terraform.tfvars`
@@ -302,13 +372,18 @@ terraform -chdir=env/windows apply
 
 ## Использование
 
+Terraform только **создаёт** гостей (обоих можно держать созданными
+одновременно — они выключены). Запуск/остановку/своп железа делает
+`scripts/workstation.sh` — см. [Переключение ОС](#переключение-ос-lock).
+
 ```bash
 source scripts/apply-wrapper.sh
 vault login -method=userpass username=<you>
 
-terraform -chdir=env/windows init && terraform -chdir=env/windows apply   # VM
-# ИЛИ (не одновременно — сначала переключить хост, см. Архитектура):
-terraform -chdir=env/ubuntu  init && terraform -chdir=env/ubuntu  apply   # LXC
+terraform -chdir=env/windows init && terraform -chdir=env/windows apply   # создать VM
+terraform -chdir=env/ubuntu  init && terraform -chdir=env/ubuntu  apply   # создать LXC
+
+ssh bare-pve scripts/workstation.sh start windows    # запустить одну из них
 ```
 
 `env/ubuntu` при первом `apply` **пересоздаёт** ресурс (был
@@ -365,6 +440,9 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `agent_enabled`            | bool        | `false`                      | QEMU guest agent (включать после установки virtio-тулзов) |
 | `iso_file_id`              | string      | `local:iso/Win10_22H2_...`   | Volume ID установочного ISO                 |
 
+`env/windows` передаёт в `mod/vm` `on_boot = false` — стартом управляет
+`scripts/workstation.sh`, автозапуска на буте нет.
+
 ### `env/ubuntu` (LXC)
 
 | Переменная          | Тип          | По умолчанию                                            | Описание                                       |
@@ -375,7 +453,7 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `proxmox_api_token` | string       | — (sensitive)                                           | API-токен `terraform@pve`                       |
 | `ct_name`           | string       | `ubuntu-workstation`                                    | Hostname контейнера                             |
 | `cores`             | number       | `4`                                                    | Ядра CPU                                        |
-| `memory`            | number       | `8192`                                                  | RAM, МиБ                                        |
+| `memory`            | number       | `12288`                                                 | RAM, МиБ (как у `env/windows` — вместе не запускаются) |
 | `swap`              | number       | `0`                                                    | Swap, МиБ                                       |
 | `unprivileged`      | bool         | `true`                                                  | Unprivileged CT (GPU-ноды приходят с `mode=0666`) |
 | `template_file_id`  | string       | `local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst` | LXC-шаблон (minimal rootfs, **не** cloud)   |
@@ -384,6 +462,11 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `ipv4_address`      | string       | `dhcp`                                                  | `dhcp` или статический CIDR                     |
 | `ipv4_gateway`      | string       | `null`                                                  | Шлюз для статического адреса                    |
 | `ssh_public_keys`   | list(string) | `[]`                                                    | Ключи root внутри CT                            |
+
+`env/ubuntu` жёстко задаёт `start_on_boot = false` и `device_passthrough` для
+GPU/DRI-нод; весь USB/input/sound добавляется отдельно
+`scripts/lxc-usb-passthrough.sh` (см.
+[Установка Ubuntu с нуля](#установка-ubuntu-с-нуля-lxc)).
 
 ### `mod/ct`
 
@@ -421,6 +504,7 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `memory`              | number                                 | `512`           | RAM, МБ                                           |
 | `cpu_type`            | string                                 | `host`          | Модель CPU (`host` для passthrough-рабочки)       |
 | `agent_enabled`       | bool                                   | `false`         | Канал QEMU guest agent                            |
+| `on_boot`             | bool                                   | `true`          | Автозапуск на буте (`env/windows` ставит `false` — стартом рулит `workstation.sh`) |
 | `datastore_id_disk`   | string                                 | `local-lvm`     | Datastore для дисков VM                           |
 | `disk_interface`      | string                                 | `sata0`         | Интерфейс основного диска (`sata0`/`scsi0`)       |
 | `disk_size`           | number                                 | `10`            | Размер диска, ГБ                                  |
@@ -486,14 +570,19 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 - **Физический монитор из контейнера — нерешённый вопрос.** VM с `x-vga`
   захватывает вывод карты целиком; LXC разделяет карту и по умолчанию не
   становится DRM-master. Рабочие варианты: (а) headless X + `xrdp`/Sunshine
-  (скрипт ставит `xrdp`), (б) дать CT `/dev/dri/card0` + `/dev/input/*` + `/dev/tty7`
-  и запускать свой Xorg на seat0 — строки `device_passthrough` для input
-  закомментированы в `env/ubuntu/main.tf` до выбора архитектуры.
+  (скрипт ставит `xrdp`), (б) свой Xorg на seat0 — `/dev/dri/card0` и весь
+  `/dev/input` в CT уже есть (terraform + `lxc-usb-passthrough.sh`), нужен
+  `/dev/tty7` + правка `logind`. Архитектура пока не выбрана.
 - **USB-контроллер целиком в LXC пробросить нельзя** — это PCI, только VM.
-  Контейнеру отдаются отдельные ноды (`/dev/input/eventN`, `/dev/bus/usb/...`).
-- **`unprivileged = true` + запись в bind-mount** требует совпадения uid/gid
-  (idmap). Для GPU-нод это не важно (`mode=0666`), но общие каталоги с хостом
-  надо планировать под маппинг `100000+`.
+  `scripts/lxc-usb-passthrough.sh` даёт эквивалент: bind-mount `/dev/bus/usb`,
+  `/dev/input`, `/dev/snd` + cgroup-allow на major 189/13/116/166 → все
+  устройства, hotplug работает. Применяется вне terraform (директории и
+  диапазоны major'ов `device_passthrough` не выражает); повторять после
+  каждого `apply`, который пересоздаёт CT.
+- **`unprivileged = true`**: ноды из bind-mount CT видит как `nobody:nogroup`,
+  поэтому `lxc-usb-passthrough.sh` кладёт на хост udev-правило
+  `MODE="0666"` на `usb`/`input`/`sound`. Запись в общие каталоги с хостом —
+  планировать под idmap `100000+`.
 - **Смена VM → LXC пересоздаёт ресурс** в state-ключе `ubuntu/terraform.tfstate`
   (разные типы ресурсов, `moved` невозможен).
 
@@ -523,17 +612,21 @@ OVMF без GOP => на экране установщика ничего не в
 1. Скачать шаблон на ноде:
    `pveam update && pveam download local ubuntu-26.04-standard_26.04-1_amd64.tar.zst`
    (уточнить имя через `pveam available --section system | grep ubuntu`).
-2. `terraform -chdir=env/ubuntu apply`. Контейнер стартует с обычного minimal
-   rootfs + проброшенными GPU/DRI-нодами.
-3. Провижн внутри CT:
+2. `terraform -chdir=env/ubuntu apply` — CT создаётся **выключенным**
+   (`start_on_boot=false`), с GPU/DRI-нодами.
+3. Весь USB/input/sound (вне terraform, идемпотентно):
+   `ssh bare-pve scripts/lxc-usb-passthrough.sh <ctid>`
+4. Первый старт — через lock-механизм (он же перекинет карту с vfio-pci, если
+   надо): `ssh bare-pve scripts/workstation.sh start ubuntu`
+5. Провижн внутри CT:
    ```bash
    pct push <ctid> scripts/lxc-ubuntu-desktop-provision.sh /root/provision.sh
    pct exec <ctid> -- env NVIDIA_VERSION=580.xx.xx bash /root/provision.sh
    pct reboot <ctid>
    ```
    Ставит `ubuntu-desktop-minimal`, `xrdp` (если `ENABLE_XRDP=1`) и userspace-драйвер.
-4. Пользователь: `pct exec <ctid> -- adduser <you> && pct exec <ctid> -- usermod -aG sudo <you>`.
-5. Проверка GPU в CT: `pct exec <ctid> -- nvidia-smi`; `glxinfo -B` в сессии
+6. Пользователь: `pct exec <ctid> -- adduser <you> && pct exec <ctid> -- usermod -aG sudo <you>`.
+7. Проверка GPU в CT: `pct exec <ctid> -- nvidia-smi`; `glxinfo -B` в сессии
    должен показать `OpenGL renderer: NVIDIA ...`.
 
 ## Code 43

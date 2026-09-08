@@ -1,4 +1,4 @@
-# Ubuntu desktop workstation on bare-pve — now an LXC container, not a VM.
+# Ubuntu desktop workstation on bare-pve — an LXC container, not a VM.
 #
 # Why a container:
 #   - No vfio, no OVMF, no Code 43, no "monitor dark until the driver loads".
@@ -10,10 +10,9 @@
 # HARD REQUIREMENT — host must run the NVIDIA driver, NOT vfio-pci:
 #   This is the exact opposite of scripts/iommu-vfio-setup.sh. The GPU on
 #   bare-pve can be bound to vfio-pci (for env/windows) OR to nvidia (for this
-#   CT), never both. Flip the host with scripts/lxc-nvidia-host-setup.sh and
-#   reboot before this env can start. env/windows and env/ubuntu stay mutually
-#   exclusive — the conflict just moved from the mapping layer to the host
-#   driver layer.
+#   CT), never both. env/windows and env/ubuntu are mutually exclusive and
+#   NEITHER autostarts — scripts/workstation.sh owns the lock + the driver
+#   swap + start/stop. See README "Переключение ОС".
 #
 # The .tar.zst template is a standard minimal Ubuntu rootfs (NOT a cloud
 # image); ubuntu-desktop + the NVIDIA userspace driver are installed on first
@@ -37,14 +36,18 @@ module "ubuntu_ct" {
 
   ssh_public_keys = var.ssh_public_keys
 
+  # Lifecycle is external (scripts/workstation.sh) — never autostart.
+  start_on_boot = false
+
   tags = ["workstation", "gpu", "ubuntu"]
 
   # nesting/keyctl/fuse default true in the module — a GNOME session, gdm and
   # Flatpak all need them.
 
-  # NVIDIA GPU + render nodes. Paths must exist on the host (nvidia driver
-  # loaded, nvidia-persistenced or the udev rules from lxc-nvidia-host-setup.sh
-  # creating the uvm nodes). Mode 0666 so the unprivileged CT can open them.
+  # --- GPU: stable device nodes, managed by Terraform ------------------------
+  # Paths must exist on the host (nvidia driver loaded + nvidia-persistenced /
+  # the udev rule from lxc-nvidia-host-setup.sh creating the uvm nodes). Mode
+  # 0666 so the unprivileged CT can open them.
   device_passthrough = [
     { path = "/dev/nvidia0" },
     { path = "/dev/nvidiactl" },
@@ -53,13 +56,19 @@ module "ubuntu_ct" {
     { path = "/dev/nvidia-modeset" },
     { path = "/dev/dri/card0" },
     { path = "/dev/dri/renderD128" },
-
-    # Local keyboard/mouse for a CT that drives the physical monitor. A whole
-    # USB *controller* is PCI (VM-only); a container gets the evdev nodes
-    # instead. Uncomment once the architecture (physical seat vs. headless +
-    # RDP/Sunshine) is settled — see README.
-    # { path = "/dev/input/event0" },
-    # { path = "/dev/input/mice" },
-    # { path = "/dev/tty7" },
   ]
+
+  # --- ALL USB + input + sound: raw lxc.* config ----------------------------
+  # A whole USB *controller* is a PCI device (VM-only). A container instead
+  # gets the whole USB devfs + evdev + ALSA, which is functionally identical
+  # for a workstation (every keyboard/mouse/headset/stick, hotplug included).
+  # Terraform's device_passthrough is per-node and cannot express the /dev
+  # directory bind-mounts + cgroup major ranges this needs, so it is applied
+  # out-of-band and idempotently:
+  #
+  #   ssh bare-pve scripts/lxc-usb-passthrough.sh <ctid>
+  #
+  # (re-run after any `terraform apply` that recreates the CT). The script
+  # appends c 189:* / c 13:* / c 116:* cgroup allows and bind-mounts
+  # /dev/bus/usb, /dev/input, /dev/snd into /etc/pve/lxc/<ctid>.conf.
 }

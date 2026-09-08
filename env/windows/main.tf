@@ -12,6 +12,10 @@ module "minimal_vm" {
   disk_interface = "sata0"
   disk_size      = 60
 
+  # scripts/workstation.sh owns start/stop — no autostart race with env/ubuntu
+  # over the shared GPU.
+  on_boot = false
+
   # Whole-device passthrough for bare-pve: the entire GPU, all three USB
   # controllers and the onboard audio go to the guest. Only storage (SATA,
   # IOMMU group 9 — the PVE boot disk) and the Realtek NIC (group 10, vmbr0)

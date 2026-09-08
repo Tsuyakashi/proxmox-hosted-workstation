@@ -38,9 +38,9 @@ variable "cores" {
 }
 
 variable "memory" {
-  description = "RAM in MiB."
+  description = "RAM in MiB. Matches env/windows (they never run at the same time)."
   type        = number
-  default     = 8192
+  default     = 12288
 }
 
 variable "swap" {

@@ -37,6 +37,16 @@ variable "agent_enabled" {
   default     = false
 }
 
+variable "on_boot" {
+  description = <<-EOT
+    Start this VM automatically when the node boots. Set false when an external
+    switch (scripts/workstation.sh) owns the lifecycle — the workstation guests
+    are mutually exclusive over one GPU and must not race to grab it at boot.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "datastore_id_disk" {
   description = "Datastore для диска VM."
   type        = string
