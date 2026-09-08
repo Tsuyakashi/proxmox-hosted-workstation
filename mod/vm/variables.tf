@@ -47,6 +47,18 @@ variable "on_boot" {
   default     = true
 }
 
+variable "hook_script_file_id" {
+  description = <<-EOT
+    Volume id of a Proxmox hookscript (snippets), e.g.
+    local:snippets/gpu-arbiter.sh. Its pre-start phase can rebind the GPU /
+    abort the start if the mutually-exclusive guest is running. The file is
+    installed on the node out of band (scripts/install-gpu-arbiter.sh) — bpg
+    can only upload snippets over SSH, which this project avoids.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "datastore_id_disk" {
   description = "Datastore для диска VM."
   type        = string

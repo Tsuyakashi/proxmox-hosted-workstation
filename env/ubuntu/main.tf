@@ -11,8 +11,9 @@
 #   This is the exact opposite of scripts/iommu-vfio-setup.sh. The GPU on
 #   bare-pve can be bound to vfio-pci (for env/windows) OR to nvidia (for this
 #   CT), never both. env/windows and env/ubuntu are mutually exclusive and
-#   NEITHER autostarts — scripts/workstation.sh owns the lock + the driver
-#   swap + start/stop. See README "Переключение ОС".
+#   NEITHER autostarts. The gpu-arbiter.sh hookscript (pre-start) rebinds the
+#   GPU/USB on `pct start` and aborts the start if the Windows VM is running;
+#   scripts/workstation.sh is the CLI on top. See README "Переключение ОС".
 #
 # The .tar.zst template is a standard minimal Ubuntu rootfs (NOT a cloud
 # image); ubuntu-desktop + the NVIDIA userspace driver are installed on first
@@ -36,8 +37,11 @@ module "ubuntu_ct" {
 
   ssh_public_keys = var.ssh_public_keys
 
-  # Lifecycle is external (scripts/workstation.sh) — never autostart.
-  start_on_boot = false
+  # Lifecycle is external — never autostart. gpu-arbiter.sh (installed on the
+  # node by scripts/install-gpu-arbiter.sh) runs as this CT's pre-start hook:
+  # it rebinds the GPU to nvidia and refuses the start if the Windows VM is up.
+  start_on_boot       = false
+  hook_script_file_id = var.hook_script_file_id
 
   tags = ["workstation", "gpu", "ubuntu"]
 

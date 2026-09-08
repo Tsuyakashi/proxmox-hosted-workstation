@@ -33,9 +33,10 @@ resource "proxmox_hardware_mapping_pci" "this" {
 }
 
 resource "proxmox_virtual_environment_vm" "this" {
-  name      = var.name
-  node_name = var.node_name
-  on_boot   = var.on_boot
+  name                = var.name
+  node_name           = var.node_name
+  on_boot             = var.on_boot
+  hook_script_file_id = var.hook_script_file_id
 
   machine = "q35"
   bios    = "ovmf"

@@ -95,3 +95,13 @@ variable "ssh_public_keys" {
   type        = list(string)
   default     = []
 }
+
+variable "hook_script_file_id" {
+  description = <<-EOT
+    Proxmox hookscript volume id — the GPU arbiter's pre-start phase. Install
+    the file first with scripts/install-gpu-arbiter.sh (it is not uploaded by
+    Terraform: bpg only does snippets over SSH). null = no hookscript.
+  EOT
+  type        = string
+  default     = "local:snippets/gpu-arbiter.sh"
+}

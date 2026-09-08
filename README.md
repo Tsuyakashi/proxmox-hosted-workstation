@@ -150,8 +150,10 @@ proxmox-hosted-workstation/
 │   ├── lxc-nvidia-host-setup.sh         # хост -> драйвер nvidia (первичная подготовка, env/ubuntu)
 │   ├── lxc-ubuntu-desktop-provision.sh  # внутри CT: ubuntu-desktop + userspace NVIDIA
 │   ├── lxc-usb-passthrough.sh           # весь /dev/bus/usb + /dev/input + /dev/snd в CT
-│   ├── workstation.sh                   # lock + live-своп GPU/USB + start/stop одной ОС
-│   ├── workstation-resume.service       # systemd: до-switch после reboot (--via-reboot)
+│   ├── gpu-arbiter.sh                   # Proxmox pre-start хук: своп GPU/USB + lock (движок)
+│   ├── workstation.sh                   # CLI поверх арбитра: status / start --force / --via-reboot
+│   ├── workstation-resume.service       # systemd: до-старт после reboot (--via-reboot)
+│   ├── install-gpu-arbiter.sh           # разложить хукскрипт + юнит на ноду
 │   └── apply-wrapper.sh                 # обёртка terraform: тянет секреты из Vault
 ├── .gitignore
 └── README.md
@@ -289,64 +291,86 @@ readlink -f /sys/bus/pci/devices/0000:<addr>/iommu_group   # iommu_group (пос
 ## Переключение ОС (lock)
 
 `env/windows` (VM) и `env/ubuntu` (LXC) делят один GPU и один комплект
-USB-контроллеров. `scripts/workstation.sh` — единственная точка управления
-жизненным циклом; выполняется на хосте под root.
+USB-контроллеров. Механизм переключения — **нативный хукскрипт Proxmox**
+`scripts/gpu-arbiter.sh`, повешенный на оба гостя как `pre-start`.
+`scripts/workstation.sh` — CLI-обёртка сверху.
 
 ### Модель
 
 - Обе гостевые ОС по умолчанию **выключены** (`on_boot=false` в `mod/vm`,
-  `start_on_boot=false` в `env/ubuntu`). На буте гонки за карту нет.
+  `start_on_boot=false` в `mod/ct`). На буте гонки за карту нет.
 - Остановка одной ОС **никогда** не запускает другую. Ничего не сцепляется
-  автоматически. Валидное состояние по умолчанию — «обе выключены».
-- Единственный триггер — `start <guest>`. Он:
-  1. берёт `flock` (`/run/lock/workstation.lock`) — свопы сериализуются;
-  2. **отказывает**, если запущена другая ОС (`--force` — сначала погасить её);
-  3. смотрит, какой драйвер сейчас держит GPU (`.../0000:01:00.0/driver`);
-  4. если это не режим цели — **живьём** перепривязывает GPU + HDMI-audio +
-     USB-функции (`driver_override` + `unbind` + `drivers_probe`);
-  5. стартует гостя (`qm start` / `pct start`).
+  автоматически (`post-stop` — no-op). Валидное состояние — «обе выключены».
+- Любой запуск гостя — `qm start`, `pct start`, кнопка Start в веб-морде,
+  API, routine — дёргает `pre-start` хук, который:
+  1. берёт `flock` (`/run/lock/gpu-arbiter.lock`);
+  2. определяет себя по `/etc/pve/qemu-server/<id>.conf` (→ windows/vfio) или
+     `/etc/pve/lxc/<id>.conf` (→ ubuntu/nvidia);
+  3. если запущен **другой** гость — `exit 1` → **Proxmox отменяет старт**
+     (это и есть lock: нативная отмена pre-start);
+  4. если драйвер GPU не соответствует режиму цели — **живьём** перепривязывает
+     GPU + HDMI-audio + USB-функции (`driver_override` + `unbind` +
+     `drivers_probe`), для ubuntu ждёт появления `/dev/nvidia*`, `/dev/dri/*`;
+  5. `exit 0` → Proxmox запускает гостя.
+- Лог всех действий — `/var/log/gpu-arbiter.log` (иначе провал хука виден
+  только как `Failed to run lxc.hook.pre-start`).
+
+### Установка (разово на ноду)
+
+Хукскрипт не заливается терраформом (bpg умеет snippets только по SSH,
+[#2112](https://github.com/bpg/terraform-provider-proxmox/issues/2112) `wontfix`;
+проект — token-only). Кладём вручную:
+
+```bash
+scp scripts/gpu-arbiter.sh scripts/workstation.sh scripts/install-gpu-arbiter.sh \
+    scripts/workstation-resume.service root@bare-pve:/root/
+ssh root@bare-pve 'cd /root && bash install-gpu-arbiter.sh'
+```
+
+Дальше `terraform -chdir=env/ubuntu apply` проставит
+`hookscript: local:snippets/gpu-arbiter.sh` в конфиг CT (`hook_script_file_id`).
+Для Windows-VM — по желанию: `qm set <winid> --hookscript local:snippets/gpu-arbiter.sh`
+(или пользоваться `workstation.sh` для винды).
 
 ### Команды
 
 ```bash
-ssh bare-pve scripts/workstation.sh status                  # режим хоста, гости, привязки PCI
-ssh bare-pve scripts/workstation.sh start  ubuntu           # своп при необходимости -> pct start
-ssh bare-pve scripts/workstation.sh start  windows --force  # погасить ubuntu -> своп -> qm start
-ssh bare-pve scripts/workstation.sh stop                    # погасить всё, НИЧЕГО не стартовать
-ssh bare-pve scripts/workstation.sh switch ubuntu           # только своп драйверов (обе ОС должны стоять)
+# просто через Proxmox — хук всё сделает сам:
+pct start <ctid>            # свопнёт GPU на nvidia (если надо) и стартанёт CT
+qm  start <winid>           # свопнёт на vfio-pci; откажет, если CT запущен
+
+# CLI-обёртка (status / --force / --via-reboot):
+ssh bare-pve /usr/local/sbin/workstation.sh status
+ssh bare-pve /usr/local/sbin/workstation.sh start windows --force  # погасить ubuntu -> своп -> qm start
+ssh bare-pve /usr/local/sbin/workstation.sh stop                   # погасить всё, НИЧЕГО не стартовать
+ssh bare-pve /usr/local/sbin/workstation.sh switch ubuntu          # только своп (обе ОС должны стоять)
 ```
 
-Типичный цикл (ровно то, что нужно):
+Типичный цикл:
 
 ```
 stop windows  ->  (карта осталась на vfio-pci)  ->  start ubuntu
    |                                                      |
-   |  workstation.sh видит host_mode=windows != ubuntu    |
-   |  и живьём перекидывает GPU vfio-pci -> nvidia,        |
-   v  USB vfio-pci -> xhci_pci, затем pct start            v
+   |  pre-start хук: host=windows != ubuntu, другой       |
+   |  гость не запущен -> GPU vfio-pci -> nvidia,          |
+   v  USB -> xhci_pci, ждём /dev/nvidia* -> pct стартует   v
  обе off  <----------------  stop ubuntu  <----------------  ubuntu up
 ```
 
 ### Живой своп vs. reboot
 
 Перепривязка `vfio-pci <-> nvidia` в рантайме работает, когда устройство никто
-не держит (гость остановлен, нет `nvidia-persistenced`/Xorg на хосте — скрипт
-сам гасит persistenced). Если устройство занято — `start`/`switch` печатает
-инструкцию и вариант через перезагрузку:
+не держит (другой гость остановлен — хук это уже проверил; `nvidia-persistenced`
+хук гасит сам). Если всё же занято — хук делает `exit 1` (старт отменён) с
+подсказкой; резерв — через перезагрузку:
 
 ```bash
-ssh bare-pve scripts/workstation.sh switch ubuntu --via-reboot
+ssh bare-pve /usr/local/sbin/workstation.sh switch ubuntu --via-reboot
 ```
 
-Это пишет `/var/lib/workstation/pending-start` и перезагружает ноду;
-`workstation-resume.service` после бута (когда карту ещё никто не держит)
-до-выполняет `start ubuntu`. Установка юнита:
-
-```bash
-install -m 0755 scripts/workstation.sh          /usr/local/sbin/workstation.sh
-install -m 0644 scripts/workstation-resume.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable workstation-resume.service
-```
+Пишет `/var/lib/workstation/pending-start`, ребутит ноду; после бута (карту ещё
+никто не держит) `workstation-resume.service` до-выполняет `start ubuntu`.
+Юнит ставит `install-gpu-arbiter.sh`.
 
 > Cluster-маппинги `proxmox_hardware_mapping_pci` при свопе **не трогаются** —
 > это просто метаданные, Proxmox сверяет их только при старте VM. «Свап
@@ -462,6 +486,7 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `ipv4_address`      | string       | `dhcp`                                                  | `dhcp` или статический CIDR                     |
 | `ipv4_gateway`      | string       | `null`                                                  | Шлюз для статического адреса                    |
 | `ssh_public_keys`   | list(string) | `[]`                                                    | Ключи root внутри CT                            |
+| `hook_script_file_id` | string     | `local:snippets/gpu-arbiter.sh`                         | pre-start хук-арбитр (файл кладёт `install-gpu-arbiter.sh`) |
 
 `env/ubuntu` жёстко задаёт `start_on_boot = false` и `device_passthrough` для
 GPU/DRI-нод; весь USB/input/sound добавляется отдельно
@@ -504,7 +529,8 @@ GPU/DRI-нод; весь USB/input/sound добавляется отдельно
 | `memory`              | number                                 | `512`           | RAM, МБ                                           |
 | `cpu_type`            | string                                 | `host`          | Модель CPU (`host` для passthrough-рабочки)       |
 | `agent_enabled`       | bool                                   | `false`         | Канал QEMU guest agent                            |
-| `on_boot`             | bool                                   | `true`          | Автозапуск на буте (`env/windows` ставит `false` — стартом рулит `workstation.sh`) |
+| `on_boot`             | bool                                   | `true`          | Автозапуск на буте (`env/windows` ставит `false` — стартом рулит арбитр) |
+| `hook_script_file_id` | string                                 | `null`          | Volume id хукскрипта (`local:snippets/gpu-arbiter.sh`) |
 | `datastore_id_disk`   | string                                 | `local-lvm`     | Datastore для дисков VM                           |
 | `disk_interface`      | string                                 | `sata0`         | Интерфейс основного диска (`sata0`/`scsi0`)       |
 | `disk_size`           | number                                 | `10`            | Размер диска, ГБ                                  |
@@ -609,24 +635,28 @@ OVMF без GOP => на экране установщика ничего не в
 
 Хост уже в режиме B (`lxc-nvidia-host-setup.sh` + reboot, `nvidia-smi` работает).
 
-1. Скачать шаблон на ноде:
+1. Разложить арбитр на ноду (разово):
+   `ssh root@bare-pve 'cd /root && bash install-gpu-arbiter.sh'` — см.
+   [Переключение ОС → Установка](#установка-разово-на-ноду).
+2. Скачать шаблон на ноде:
    `pveam update && pveam download local ubuntu-26.04-standard_26.04-1_amd64.tar.zst`
    (уточнить имя через `pveam available --section system | grep ubuntu`).
-2. `terraform -chdir=env/ubuntu apply` — CT создаётся **выключенным**
-   (`start_on_boot=false`), с GPU/DRI-нодами.
-3. Весь USB/input/sound (вне terraform, идемпотентно):
+3. `terraform -chdir=env/ubuntu apply` — CT создаётся **выключенным**
+   (`start_on_boot=false`), с GPU/DRI-нодами и `hookscript:` в конфиге.
+4. Весь USB/input/sound (вне terraform, идемпотентно):
    `ssh bare-pve scripts/lxc-usb-passthrough.sh <ctid>`
-4. Первый старт — через lock-механизм (он же перекинет карту с vfio-pci, если
-   надо): `ssh bare-pve scripts/workstation.sh start ubuntu`
-5. Провижн внутри CT:
+5. Первый старт — просто `pct start <ctid>` (или кнопкой в веб-морде): pre-start
+   хук перекинет карту с vfio-pci на nvidia и стартанёт CT. `workstation.sh
+   start ubuntu` — то же плюс `--force`.
+6. Провижн внутри CT:
    ```bash
    pct push <ctid> scripts/lxc-ubuntu-desktop-provision.sh /root/provision.sh
    pct exec <ctid> -- env NVIDIA_VERSION=580.xx.xx bash /root/provision.sh
    pct reboot <ctid>
    ```
    Ставит `ubuntu-desktop-minimal`, `xrdp` (если `ENABLE_XRDP=1`) и userspace-драйвер.
-6. Пользователь: `pct exec <ctid> -- adduser <you> && pct exec <ctid> -- usermod -aG sudo <you>`.
-7. Проверка GPU в CT: `pct exec <ctid> -- nvidia-smi`; `glxinfo -B` в сессии
+7. Пользователь: `pct exec <ctid> -- adduser <you> && pct exec <ctid> -- usermod -aG sudo <you>`.
+8. Проверка GPU в CT: `pct exec <ctid> -- nvidia-smi`; `glxinfo -B` в сессии
    должен показать `OpenGL renderer: NVIDIA ...`.
 
 ## Code 43
