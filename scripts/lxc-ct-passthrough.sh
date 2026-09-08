@@ -129,7 +129,6 @@ lxc.cgroup2.devices.allow: c 226:* rwm
 lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0
-lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/fb0 dev/fb0 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/tty7 dev/tty7 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/vga_arbiter dev/vga_arbiter none bind,optional,create=file 0 0
