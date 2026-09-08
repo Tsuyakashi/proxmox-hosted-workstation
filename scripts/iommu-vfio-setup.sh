@@ -87,14 +87,20 @@ GPU_VGA_ID=$(echo "$GPU_LINE" | grep -oP '\[\K[0-9a-f]{4}:[0-9a-f]{4}(?=\])' | t
 
 echo "[gpu-detect] Found GPU at $GPU_PCI_ADDR (ID: $GPU_VGA_ID)"
 
-# Check for associated audio function (same bus:slot, function .1)
+# Check for associated audio function (same bus:slot, function .1).
+# `lspci -n` columns are: "<slot> <class>: <vendor>:<device> (rev NN)" — the
+# vendor:device pair we need is field 3, not field 2 (that is the class).
 GPU_AUDIO_LINE=$(lspci -n -s "$GPU_BUS_SLOT" | grep "\.1 " || true)
 GPU_IDS="$GPU_VGA_ID"
 
 if [ -n "$GPU_AUDIO_LINE" ]; then
-  GPU_AUDIO_ID=$(echo "$GPU_AUDIO_LINE" | awk '{print $2}')
-  GPU_IDS="${GPU_VGA_ID},${GPU_AUDIO_ID}"
-  echo "[gpu-detect] Found audio function: $GPU_AUDIO_ID"
+  GPU_AUDIO_ID=$(echo "$GPU_AUDIO_LINE" | awk '{print $3}')
+  if [[ "$GPU_AUDIO_ID" =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]]; then
+    GPU_IDS="${GPU_VGA_ID},${GPU_AUDIO_ID}"
+    echo "[gpu-detect] Found audio function: $GPU_AUDIO_ID"
+  else
+    echo "[gpu-detect] Audio function line not parseable ('$GPU_AUDIO_ID'), skipping"
+  fi
 else
   echo "[gpu-detect] No audio function found for this GPU"
 fi
