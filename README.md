@@ -83,10 +83,12 @@ Board: ASRock H81M-VG4 R2.0, UEFI P1.50
   `scripts/lxc-ct-passthrough.sh` (root@pam-only), а не токен-terraform.
 - **`env/<name>`** — конкретные окружения:
   - `env/windows` — Windows-рабочка (VM, `mod/vm`).
-  - `env/ubuntu` — Ubuntu 26.04 **desktop LXC** (`mod/ct`). Шаблон — обычный
-    minimal-rootfs (не cloud-образ); `ubuntu-desktop` + userspace-драйвер
-    NVIDIA ставятся при первой загрузке скриптом
-    `scripts/lxc-ubuntu-desktop-provision.sh`.
+  - `env/ubuntu` — Ubuntu 26.04 **desktop LXC** (`mod/ct`), рабочий стол
+    физически на мониторах. LXC (общее ядро хоста), а не VM, потому что
+    **анти-читы банят гипервизоры** (по CPUID); LXC для них — не VM.
+    Шаблон — обычный minimal-rootfs (не cloud-образ);
+    `scripts/lxc-ubuntu-desktop-provision.sh` доставляет **XFCE** + userspace
+    NVIDIA + Steam/Discord/Chrome/VS Code.
 
 Каждое окружение хранит своё состояние отдельно (S3 backend, ключ
 `<env>/terraform.tfstate`).
@@ -112,11 +114,14 @@ Board: ASRock H81M-VG4 R2.0, UEFI P1.50
 GPU + USB под нужный режим и стартует гостя. Остановка одной ОС **не** запускает
 другую.
 
-> Архитектурный вопрос «как контейнер отдаёт картинку» (физический монитор vs.
-> headless + RDP/Sunshine) пока открыт — `env/ubuntu` пробрасывает GPU/DRI +
-> весь `/dev/input`, дисплейный сервер настраивается в
-> `scripts/lxc-ubuntu-desktop-provision.sh`.
-> `mod/vm.manage_mappings = false` остаётся для будущего общего env с маппингами.
+> **Картинку контейнер отдаёт прямо на физические мониторы.** Хост headless
+> (Proxmox сам X не поднимает), поэтому Xorg внутри CT открывает
+> `/dev/dri/card0` и сам становится DRM-master. Ни display manager, ни VT:
+> systemd-сервис запускает `xinit … X :0 vt7 -keeptty -novtswitch` от
+> пользователя. DE — **XFCE** (GNOME требует logind-сессию, которую
+> unprivileged LXC не создаёт; Plasma 6.6 на 26.04 — только Wayland). Ввод —
+> **evdev** (libinput не работает без udev). См.
+> [Известные ограничения → LXC](#lxc-envubuntu).
 
 ### Провайдеры
 
@@ -156,7 +161,7 @@ proxmox-hosted-workstation/
 │   ├── iommu-vfio-setup.sh              # хост -> vfio-pci (первичная подготовка, env/windows)
 │   ├── lxc-nvidia-host-setup.sh         # хост -> драйвер nvidia 580 (первичная подготовка, env/ubuntu)
 │   ├── lxc-ct-passthrough.sh            # на ноде: root@pam-биты CT (dev[n] GPU / features / hookscript / USB)
-│   ├── lxc-ubuntu-desktop-provision.sh  # внутри CT: desktop + userspace NVIDIA + steam/discord/vscode/sunshine
+│   ├── lxc-ubuntu-desktop-provision.sh  # внутри CT: XFCE + userspace NVIDIA + manual-Xorg сессия + Steam/Discord/Chrome/VS Code
 │   ├── gpu-arbiter.sh                   # Proxmox pre-start хук: своп GPU/USB + lock (движок)
 │   ├── workstation.sh                   # CLI поверх арбитра: status / start --force / --via-reboot
 │   ├── workstation-resume.service       # systemd: до-старт после reboot (--via-reboot)
@@ -242,8 +247,9 @@ lspci -k -s <gpu-pci-addr>   # ожидаем "Kernel driver in use: vfio-pci"
    (дефолт `580.178.04` — проверено: собирается и грузится на ядре
    `7.0.2-6-pve`). GTX 950 = Maxwell → **ветка 580 последняя**; open-модули не
    годятся (Turing+).
-6. `modules-load.d` + `nvidia-drm modeset=1` + udev (`nvidia-modprobe`) —
-   `/dev/nvidia*` / `/dev/dri/*` без X-сервера. `update-initramfs` (для бута).
+6. `modules-load.d` + `nvidia-drm modeset=1 fbdev=1` + udev (`nvidia-modprobe`)
+   — `/dev/nvidia*`, `/dev/dri/*`, `/dev/fb0` и DRM-коннекторы без X-сервера
+   (нужны, чтобы Xorg внутри CT зажёг мониторы). `update-initramfs`.
 
 ```bash
 ssh bare-pve 'NVIDIA_VERSION=580.178.04 bash -s' < scripts/lxc-nvidia-host-setup.sh
@@ -648,10 +654,25 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
   карту — `lxc-nvidia-host-setup.sh` его блэклистит вместе с `nouveau`.
 - **`nvidia-persistenced`** этот `.run` не ставит юнитом — ноды создают udev +
   `modules-load.d` + `nvidia-modprobe` из `lxc-nvidia-host-setup.sh`.
-- **Физический монитор из контейнера — нерешённый вопрос.** LXC разделяет карту
-  и по умолчанию не DRM-master. Варианты: (а) headless X + `xrdp`/Sunshine
-  (`lxc-ubuntu-desktop-provision.sh` ставит оба), (б) свой Xorg на seat0 —
-  `/dev/dri/card0` + `/dev/input` в CT есть, нужен `/dev/tty7` + `logind`.
+- **Физический монитор из контейнера — работает.** Хост headless → DRM-master
+  свободен, Xorg в CT его берёт. Ключевое:
+  - `lxc-nvidia-host-setup.sh`: `nvidia-drm modeset=1 fbdev=1` → `/dev/fb0` +
+    DRM-коннекторы.
+  - `lxc-ct-passthrough.sh` seat-блок: `/dev/fb0`, `/dev/tty7` (host-tty, ноду
+    хост не использует), `/dev/vga_arbiter`, cgroup `c 4/29/226`. **НЕ**
+    `/dev/console` и `/dev/tty0` (LXC ими владеет → `sync_wait: 34`), **НЕ**
+    bind `/dev/dri` каталогом (autodev-mknod `card0` → «File exists», hook
+    status 17).
+  - Ни display manager, ни VT: `workstation-session.service` (`User=`,
+    `TTYPath=/dev/tty7`) → `xinit … X :0 vt7 -keeptty -nolisten tcp
+    -novtswitch`. `Xwrapper.config` → `needs_root_rights=yes`.
+    `loginctl enable-linger <user>` для `systemd --user`.
+  - **XFCE**, не GNOME/Plasma: GNOME требует logind-сессию (в unprivileged CT
+    `CreateSession` падает), Plasma 6.6 на 26.04 — Wayland-only.
+  - Ввод — **evdev**, не libinput (тот не стартует без udev, которого в CT
+    нет). `gen-xorg-input` строит явные `InputDevice` из
+    `/proc/bus/input/devices` перед каждым стартом X.
+  - Раскладку мониторов (лево/право, Гц) один раз в XFCE «Дисплей» — сохраняется.
 - **USB-контроллер целиком в LXC — нельзя** (PCI, только VM). Эквивалент:
   bind-mount `/dev/bus/usb` + `/dev/input` + `/dev/snd` + cgroup major
   189/13/116/166 → все устройства, hotplug. + host-udev `MODE="0666"` (иначе
@@ -702,18 +723,19 @@ ssh bare-pve 'bash /root/lxc-ct-passthrough.sh <ctid>'
 # 5. Рестарт -> pre-start хук проверит режим и стартанёт
 ssh bare-pve 'pct stop <ctid>; pct start <ctid>'   # или: workstation.sh start ubuntu
 
-# 6. Провижн десктопа внутри CT (~20-30 мин)
+# 6. Провижн десктопа внутри CT (~20-30 мин): XFCE + userspace NVIDIA +
+#    manual-Xorg сессия + Steam/Discord/Chrome/VS Code
 ssh bare-pve 'pct push <ctid> /root/lxc-ubuntu-desktop-provision.sh /root/provision.sh
-              pct exec <ctid> -- env NVIDIA_VERSION=580.178.04 bash /root/provision.sh'
-# ubuntu-desktop-minimal + userspace NVIDIA + xrdp + Sunshine + Steam + Discord + VS Code
+              pct exec <ctid> -- env NVIDIA_VERSION=580.178.04 SEAT_USER=<you> bash /root/provision.sh'
 
-# 7. Пользователь + проверка
-ssh bare-pve 'pct exec <ctid> -- bash -c "adduser <you> && usermod -aG sudo,video,render,audio <you>"'
+# 7. Рестарт CT -> мониторы загораются с XFCE
+ssh bare-pve 'workstation.sh start ubuntu'
 ssh bare-pve 'pct exec <ctid> -- nvidia-smi'
 ```
 
-Доступ: RDP на `<ct-ip>:3389`, либо Sunshine web UI `https://<ct-ip>:47990`
-(Moonlight-клиенты).
+Мониторы загораются сразу после старта CT (`workstation-session.service`).
+Первый раз — разложить экраны/Гц в XFCE «Дисплей» (сохраняется). Пароль
+пользователя по умолчанию — `workstation`, поменять.
 
 ## Code 43
 
