@@ -47,17 +47,10 @@ variable "on_boot" {
   default     = true
 }
 
-variable "hook_script_file_id" {
-  description = <<-EOT
-    Volume id of a Proxmox hookscript (snippets), e.g.
-    local:snippets/gpu-arbiter.sh. Its pre-start phase can rebind the GPU /
-    abort the start if the mutually-exclusive guest is running. The file is
-    installed on the node out of band (scripts/install-gpu-arbiter.sh) — bpg
-    can only upload snippets over SSH, which this project avoids.
-  EOT
-  type        = string
-  default     = null
-}
+# No hook_script_file_id variable — `hookscript:` is root@pam-only for VMs too
+# (qemu-server). The GPU arbiter is attached with `qm set <winid> --hookscript
+# local:snippets/gpu-arbiter.sh` on the node, or skipped in favour of
+# scripts/workstation.sh. See README "root@pam-ограничения LXC".
 
 variable "datastore_id_disk" {
   description = "Datastore для диска VM."

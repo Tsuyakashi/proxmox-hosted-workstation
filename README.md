@@ -6,8 +6,11 @@ Terraform-конфигурация для развёртывания рабоч�
 - **`env/windows`** — полноценная VM с PCI-passthrough через `vfio-pci`
   (`mod/vm` + `proxmox_hardware_mapping_pci`).
 - **`env/ubuntu`** — LXC-контейнер, который **разделяет** драйвер ядра хоста и
-  получает GPU как набор device-нод (`/dev/nvidia*`, `/dev/dri/*`) через
-  `mod/ct` (`device_passthrough`). Ни OVMF, ни vfio, ни Code 43.
+  получает GPU как набор device-нод (`/dev/nvidia*`, `/dev/dri/*`). Ни OVMF,
+  ни vfio, ни Code 43. `mod/ct` создаёт контейнер тем же API-токеном, а
+  root@pam-only части (`dev[n]`, `hookscript`, feature-флаги кроме `nesting`)
+  доводит `scripts/lxc-ct-passthrough.sh` на ноде — см.
+  [root@pam-ограничения LXC](#rootpam-ограничения-lxc).
 
 Оба варианта нацелены на одно железо и **взаимоисключающи** — см.
 [Архитектура](#архитектура).
@@ -19,6 +22,7 @@ Terraform-конфигурация для развёртывания рабоч�
 - [Структура репозитория](#структура-репозитория)
 - [Требования](#требования)
 - [Настройка хоста (GPU passthrough)](#настройка-хоста-gpu-passthrough)
+- [root@pam-ограничения LXC](#rootpam-ограничения-lxc)
 - [Переключение ОС (lock)](#переключение-ос-lock)
 - [Секреты и Vault](#секреты-и-vault)
 - [Использование](#использование)
@@ -29,13 +33,14 @@ Terraform-конфигурация для развёртывания рабоч�
 ## Стек
 
 ```
-OS:               Proxmox VE 9.2.11 x86_64
-Kernel:           Linux 7.0.14-14-pve
+OS:               Proxmox VE 9.2.2 x86_64
+Kernel:           Linux 7.0.2-6-pve
 Bootloader:       GRUB
 Terraform:        >= 1.16.1
 Provider:         bpg/proxmox 0.111.1
 State backend:    S3-compatible (MinIO)
 Secrets:          HashiCorp Vault
+LXC guest:        Ubuntu 26.04 LTS · NVIDIA 580.178.04 (host + CT userspace)
 ```
 
 Целевое железо (нода `bare-pve`):
@@ -74,7 +79,8 @@ Board: ASRock H81M-VG4 R2.0, UEFI P1.50
   `proxmox_hardware_mapping_pci` (vfio-pci, целые PCI-функции).
 - **`mod/ct`** — универсальный модуль LXC-контейнера. GPU не пробрасывается как
   PCI-устройство: контейнер работает на ядре хоста и получает device-ноды
-  (`/dev/nvidia*`, `/dev/dri/*`) через `device_passthrough` (Proxmox `dev[n]:`).
+  (`/dev/nvidia*`, `/dev/dri/*`) через `dev[n]:` — их ставит
+  `scripts/lxc-ct-passthrough.sh` (root@pam-only), а не токен-terraform.
 - **`env/<name>`** — конкретные окружения:
   - `env/windows` — Windows-рабочка (VM, `mod/vm`).
   - `env/ubuntu` — Ubuntu 26.04 **desktop LXC** (`mod/ct`). Шаблон — обычный
@@ -116,8 +122,9 @@ GPU + USB под нужный режим и стартует гостя. Ост�
 
 Один экземпляр провайдера `bpg/proxmox`, аутентификация только API-токеном
 (`terraform@pve`) — для всех ресурсов, включая `proxmox_hardware_mapping_pci`.
-Root (`root@pam`) в проекте не используется вообще. Подробности и как это
-проверить — см. [Права токена Terraform](#права-токена-terraform).
+Root (`root@pam`) в API/terraform не используется. Часть конфига LXC Proxmox
+запрещает токену на уровне исходников — эти операции делает CLI на ноде (тоже не
+через API), см. [root@pam-ограничения LXC](#rootpam-ограничения-lxc).
 
 ## Структура репозитория
 
@@ -141,15 +148,15 @@ proxmox-hosted-workstation/
 │   │   ├── variables.tf
 │   │   └── versions.tf       # required_providers
 │   └── ct/
-│       ├── main.tf           # ресурс: LXC-контейнер + device_passthrough
+│       ├── main.tf           # ресурс: LXC-контейнер (token-safe: nesting only)
 │       ├── outputs.tf
 │       ├── variables.tf
 │       └── versions.tf
 ├── scripts/
 │   ├── iommu-vfio-setup.sh              # хост -> vfio-pci (первичная подготовка, env/windows)
-│   ├── lxc-nvidia-host-setup.sh         # хост -> драйвер nvidia (первичная подготовка, env/ubuntu)
-│   ├── lxc-ubuntu-desktop-provision.sh  # внутри CT: ubuntu-desktop + userspace NVIDIA
-│   ├── lxc-usb-passthrough.sh           # весь /dev/bus/usb + /dev/input + /dev/snd в CT
+│   ├── lxc-nvidia-host-setup.sh         # хост -> драйвер nvidia 580 (первичная подготовка, env/ubuntu)
+│   ├── lxc-ct-passthrough.sh            # на ноде: root@pam-биты CT (dev[n] GPU / features / hookscript / USB)
+│   ├── lxc-ubuntu-desktop-provision.sh  # внутри CT: desktop + userspace NVIDIA + steam/discord/vscode/sunshine
 │   ├── gpu-arbiter.sh                   # Proxmox pre-start хук: своп GPU/USB + lock (движок)
 │   ├── workstation.sh                   # CLI поверх арбитра: status / start --force / --via-reboot
 │   ├── workstation-resume.service       # systemd: до-старт после reboot (--via-reboot)
@@ -221,42 +228,37 @@ lspci -k -s <gpu-pci-addr>   # ожидаем "Kernel driver in use: vfio-pci"
 
 ### Режим B — драйвер NVIDIA на хосте (для `env/ubuntu` LXC)
 
-`scripts/lxc-nvidia-host-setup.sh` — зеркало `iommu-vfio-setup.sh`, тоже
-идемпотентный. Что делает:
+`scripts/lxc-nvidia-host-setup.sh` — зеркало `iommu-vfio-setup.sh`, идемпотентный,
+**без reboot**. Что делает:
 
-1. Вычищает NVIDIA-`id`ы из `/etc/modprobe.d/vfio.conf` и nvidia/nouveau из
-   softdep — чтобы карту не перехватывал vfio-pci (USB/audio-строки не трогает,
-   они ещё нужны Windows-VM).
-2. Снимает `nvidia`/`nvidiafb` из общего blacklist, оставляет только `nouveau`.
-3. Ставит `build-essential` + `dkms` + `proxmox-headers-$(uname -r)`.
-4. Ставит проприетарный драйвер NVIDIA из `.run`-инсталлятора (`--dkms`,
-   `--no-opengl-files`) версии `NVIDIA_VERSION`. GTX 950 — Maxwell, **ветка 580
-   последняя** с его поддержкой; точный билд взять с
-   `https://download.nvidia.com/XFree86/Linux-x86_64/`.
-5. `modules-load.d` + `nvidia-drm modeset=1` + `nvidia-persistenced` + udev —
-   чтобы `/dev/nvidia*` и `/dev/dri/*` существовали на хосте без X-сервера.
-6. `update-initramfs`, печатает надо ли reboot.
+1. Добавляет apt-репо `pve-no-subscription` (enterprise без ключа отдаёт 401 →
+   headers ядра недоступны), отключает нерабочие enterprise-репо.
+2. Ставит `proxmox-headers-$(uname -r)` + `build-essential` + `dkms`.
+3. blacklist: `nouveau` + `nova_core` (in-tree Rust-драйвер NVIDIA — тоже
+   перехватил бы карту), **не** `nvidia`. Убирает nvidia-softdep, вычищает
+   GPU-`id`ы из `vfio.conf` (USB/audio-`id`ы остаются — они для Windows-VM).
+4. Освобождает GPU от vfio-pci в рантайме (откажет, если Windows-VM запущена).
+5. Ставит **проприетарный** драйвер NVIDIA (`--dkms`) версии `NVIDIA_VERSION`
+   (дефолт `580.178.04` — проверено: собирается и грузится на ядре
+   `7.0.2-6-pve`). GTX 950 = Maxwell → **ветка 580 последняя**; open-модули не
+   годятся (Turing+).
+6. `modules-load.d` + `nvidia-drm modeset=1` + udev (`nvidia-modprobe`) —
+   `/dev/nvidia*` / `/dev/dri/*` без X-сервера. `update-initramfs` (для бута).
 
 ```bash
-ssh bare-pve 'NVIDIA_VERSION=580.xx.xx bash -s' < scripts/lxc-nvidia-host-setup.sh
-ssh bare-pve reboot
-# проверка:
-lspci -k -s 01:00.0   # "Kernel driver in use: nvidia"
-nvidia-smi            # видит GTX 950
-ls -l /dev/nvidia* /dev/dri
+ssh bare-pve 'NVIDIA_VERSION=580.178.04 bash -s' < scripts/lxc-nvidia-host-setup.sh
+# проверка (reboot не нужен):
+nvidia-smi                                   # NVIDIA GeForce GTX 950, 2048 MiB
+/var/lib/vz/snippets/gpu-arbiter.sh status   # host mode -> ubuntu
 ```
 
 Дальше — полный порядок в
-[Установка Ubuntu с нуля (LXC)](#установка-ubuntu-с-нуля-lxc): `terraform apply`
-→ `lxc-usb-passthrough.sh` → `workstation.sh start ubuntu` →
-`lxc-ubuntu-desktop-provision.sh` внутри CT (ставит `ubuntu-desktop-minimal` из
-обычного архива, опционально `xrdp`, и **userspace-половину** того же драйвера
-NVIDIA — `--no-kernel-module`, модуль ядра приходит с хоста, версия обязана
-совпадать).
+[Установка Ubuntu с нуля (LXC)](#установка-ubuntu-с-нуля-lxc). Userspace-половина
+того же драйвера ставится внутри CT (`--no-kernel-module`, версия обязана
+совпадать с хостом).
 
-> `lxc-nvidia-host-setup.sh` делает разовую подготовку (persistent-конфиг под
-> первый режим). Дальнейшие переключения vfio-pci ↔ nvidia — уже
-> `workstation.sh`, без reboot.
+> Разовая подготовка. Дальнейшие переключения vfio-pci ↔ nvidia — уже
+> `gpu-arbiter.sh` / `workstation.sh`, живьём, без reboot.
 
 ### PCI hardware mapping в Proxmox (режим A)
 
@@ -288,6 +290,54 @@ lspci -vnn -s <addr> | grep -i subsystem                   # subsystem_id
 readlink -f /sys/bus/pci/devices/0000:<addr>/iommu_group   # iommu_group (последний сегмент пути)
 ```
 
+## root@pam-ограничения LXC
+
+`hardware_mapping_pci` (для VM) на токене работает — [Права токена
+Terraform](#права-токена-terraform) это разбирает: миф из README провайдера про
+«нужен root» устарел. **Для LXC история другая и это не миф.** В
+`pve-container`, `src/PVE/LXC.pm` → `check_ct_modify_config_perm`:
+
+```perl
+return 1 if $authuser eq 'root@pam';
+...
+} elsif ($opt =~ m/^dev\d+$/) {
+    raise_perm_exc("configuring device passthrough is only allowed for root\@pam");
+...
+} elsif ($opt eq 'hookscript') {
+    raise_perm_exc("changing the hookscript is only allowed for root\@pam");
+```
+
+— `raise_perm_exc` **без проверки привилегий**. Ни одна роль/ACL не даёт токену:
+
+| ключ конфига CT | кто может |
+|---|---|
+| `dev[n]:` (device passthrough) | только `root@pam` |
+| `hookscript:` | только `root@pam` |
+| `features:` — всё кроме `nesting` (`keyctl`, `fuse`, `mount`) | только `root@pam` |
+| `features: nesting=1` (на **unprivileged** CT) | токен + `VM.Allocate` ✓ |
+| rootfs, net, memory, cores, tags, … | токен ✓ |
+
+Варианты обхода у сообщества: (а) токен `root@pam!...` с `privsep=0` — тогда
+`$authuser eq 'root@pam'` и `return 1` пропускает всё; (б) конфиг на ноде под
+root (`pct set` в CLI работает как `root@pam`; либо правка
+`/etc/pve/lxc/<id>.conf` напрямую — классический до-8.2 способ).
+
+**Этот проект — (б).** `terraform` тем же токеном, что и VM, создаёт CT и ставит
+`nesting`; `scripts/lxc-ct-passthrough.sh` на ноде доводит остальное:
+
+```bash
+ssh bare-pve scripts/lxc-ct-passthrough.sh <ctid>
+```
+
+- GPU-ноды → **нативный** `pct set --devN` (Proxmox сам делает cgroup allow +
+  mount + права ноды в unprivileged CT);
+- `pct set --features nesting=1,keyctl=1,fuse=1`;
+- `pct set --hookscript local:snippets/gpu-arbiter.sh`;
+- `/dev/bus/usb` + `/dev/input` + `/dev/snd` (у них нет `dev[n]`-аналога) —
+  сырыми `lxc.mount.entry` в конфиг + host-udev `MODE="0666"`.
+
+Повторять после `terraform apply`, который пересоздаёт CT.
+
 ## Переключение ОС (lock)
 
 `env/windows` (VM) и `env/ubuntu` (LXC) делят один GPU и один комплект
@@ -317,20 +367,22 @@ USB-контроллеров. Механизм переключения — **н
 
 ### Установка (разово на ноду)
 
-Хукскрипт не заливается терраформом (bpg умеет snippets только по SSH,
-[#2112](https://github.com/bpg/terraform-provider-proxmox/issues/2112) `wontfix`;
-проект — token-only). Кладём вручную:
+Хукскрипт не заливается терраформом дважды: (1) bpg умеет `snippets` только по
+SSH ([#2112](https://github.com/bpg/terraform-provider-proxmox/issues/2112)
+`wontfix`), (2) `hookscript:` в конфиге CT — root@pam-only. Кладём вручную:
 
 ```bash
 scp scripts/gpu-arbiter.sh scripts/workstation.sh scripts/install-gpu-arbiter.sh \
-    scripts/workstation-resume.service root@bare-pve:/root/
+    scripts/workstation-resume.service scripts/lxc-ct-passthrough.sh root@bare-pve:/root/
 ssh root@bare-pve 'cd /root && bash install-gpu-arbiter.sh'
 ```
 
-Дальше `terraform -chdir=env/ubuntu apply` проставит
-`hookscript: local:snippets/gpu-arbiter.sh` в конфиг CT (`hook_script_file_id`).
-Для Windows-VM — по желанию: `qm set <winid> --hookscript local:snippets/gpu-arbiter.sh`
-(или пользоваться `workstation.sh` для винды).
+`scripts/lxc-ct-passthrough.sh <ctid>` (см.
+[root@pam-ограничения LXC](#rootpam-ограничения-lxc)) делает
+`pct set <ctid> --hookscript local:snippets/gpu-arbiter.sh` заодно с
+device-нодами. Для Windows-VM — по желанию:
+`qm set <winid> --hookscript local:snippets/gpu-arbiter.sh` (или просто
+`workstation.sh` для винды).
 
 ### Команды
 
@@ -480,18 +532,17 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `memory`            | number       | `12288`                                                 | RAM, МиБ (как у `env/windows` — вместе не запускаются) |
 | `swap`              | number       | `0`                                                    | Swap, МиБ                                       |
 | `unprivileged`      | bool         | `true`                                                  | Unprivileged CT (GPU-ноды приходят с `mode=0666`) |
-| `template_file_id`  | string       | `local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst` | LXC-шаблон (minimal rootfs, **не** cloud)   |
+| `template_file_id`  | string       | `local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst` | LXC-шаблон (minimal rootfs, **не** cloud); `pveam download local <...>` |
 | `disk_size`         | number       | `40`                                                   | rootfs, ГиБ                                     |
 | `mac`               | string       | `BC:24:11:AB:CD:01`                                     | MAC (отличается от windows)                     |
 | `ipv4_address`      | string       | `dhcp`                                                  | `dhcp` или статический CIDR                     |
 | `ipv4_gateway`      | string       | `null`                                                  | Шлюз для статического адреса                    |
 | `ssh_public_keys`   | list(string) | `[]`                                                    | Ключи root внутри CT                            |
-| `hook_script_file_id` | string     | `local:snippets/gpu-arbiter.sh`                         | pre-start хук-арбитр (файл кладёт `install-gpu-arbiter.sh`) |
 
-`env/ubuntu` жёстко задаёт `start_on_boot = false` и `device_passthrough` для
-GPU/DRI-нод; весь USB/input/sound добавляется отдельно
-`scripts/lxc-usb-passthrough.sh` (см.
-[Установка Ubuntu с нуля](#установка-ubuntu-с-нуля-lxc)).
+`env/ubuntu` жёстко задаёт `start_on_boot = false` и `nesting`. GPU-ноды,
+`hookscript`, `keyctl`/`fuse`, USB/input/sound — всё через
+`scripts/lxc-ct-passthrough.sh` на ноде (root@pam-only, см.
+[root@pam-ограничения LXC](#rootpam-ограничения-lxc)).
 
 ### `mod/ct`
 
@@ -509,14 +560,12 @@ GPU/DRI-нод; весь USB/input/sound добавляется отдельно
 | `network_bridge` / `mac` | string    | `vmbr0` / `null` | Сеть                                                       |
 | `ipv4_address` / `ipv4_gateway` | string | `dhcp` / `null` | IPv4                                                    |
 | `nameservers` / `search_domain` | list(string) / string | `null` | DNS (`null` — наследовать от ноды)               |
-| `nesting` / `keyctl` / `fuse` | bool  | `true`       | `features.*` — нужны для systemd, gdm, Flatpak                  |
-| `mount_feature`       | list(string) | `[]`         | `features.mount` — ФС, которые CT может монтировать сам         |
-| `start_on_boot`       | bool         | `true`       | Автостарт                                                       |
+| `nesting`             | bool         | `true`       | `features.nesting` — **единственный** feature-флаг, доступный токену (на unprivileged CT). keyctl/fuse/mount — root@pam, через `lxc-ct-passthrough.sh` |
+| `started`             | bool         | `true`       | Запустить ли CT после create. В `ignore_changes` — только на первый `apply`, дальше run-state у арбитра |
+| `start_on_boot`       | bool         | `true`       | Автостарт на буте ноды                                          |
 | `startup_order`       | number       | `null`       | Слот в порядке загрузки                                         |
 | `tags`                | list(string) | `[]`         | Теги CT                                                         |
 | `ssh_public_keys` / `password` | list(string) / string | `[]` / `null` | Доступ root в CT                            |
-| `hook_script_file_id` | string       | `null`       | Volume id hookscript (snippets)                                 |
-| `device_passthrough`  | list(object) | `[]`         | Host device-ноды в CT (`dev[n]:`). Поля: `path`, `mode` (`0666`), `deny_write`, `uid`, `gid` |
 | `mount_points`        | list(object) | `[]`         | Доп. mount points. Поля: `volume`, `path`, `size`, `read_only`, `acl`, `backup`, `mount_options` |
 
 ### `mod/vm`
@@ -530,7 +579,7 @@ GPU/DRI-нод; весь USB/input/sound добавляется отдельно
 | `cpu_type`            | string                                 | `host`          | Модель CPU (`host` для passthrough-рабочки)       |
 | `agent_enabled`       | bool                                   | `false`         | Канал QEMU guest agent                            |
 | `on_boot`             | bool                                   | `true`          | Автозапуск на буте (`env/windows` ставит `false` — стартом рулит арбитр) |
-| `hook_script_file_id` | string                                 | `null`          | Volume id хукскрипта (`local:snippets/gpu-arbiter.sh`) |
+| `hook_script_file_id` | string                                 | `null`          | Volume id хукскрипта. Тоже root@pam-only для VM — `qm set <winid> --hookscript` на ноде |
 | `datastore_id_disk`   | string                                 | `local-lvm`     | Datastore для дисков VM                           |
 | `disk_interface`      | string                                 | `sata0`         | Интерфейс основного диска (`sata0`/`scsi0`)       |
 | `disk_size`           | number                                 | `10`            | Размер диска, ГБ                                  |
@@ -584,33 +633,31 @@ GPU/DRI-нод; весь USB/input/sound добавляется отдельно
 
 ### LXC (`env/ubuntu`)
 
-- **Версия драйвера хост == CT.** Модуль ядра `nvidia` живёт на хосте, в
-  контейнер идёт только userspace (`--no-kernel-module`). Разъезд версий →
-  `nvidia-smi` в CT падает с `Failed to initialize NVML: Driver/library version
-  mismatch`. Обновлять — хост и `lxc-ubuntu-desktop-provision.sh` синхронно.
-- **`/dev/nvidia-uvm` появляется лениво.** Без запущенного X/CUDA-процесса нода
-  может отсутствовать на момент `terraform apply` → провайдер ругнётся, что
-  device не найден. `nvidia-persistenced` + udev-правило из
-  `lxc-nvidia-host-setup.sh` создают её на буте; либо один раз дёрнуть
-  `nvidia-modprobe -c0 -u` на хосте.
-- **Физический монитор из контейнера — нерешённый вопрос.** VM с `x-vga`
-  захватывает вывод карты целиком; LXC разделяет карту и по умолчанию не
-  становится DRM-master. Рабочие варианты: (а) headless X + `xrdp`/Sunshine
-  (скрипт ставит `xrdp`), (б) свой Xorg на seat0 — `/dev/dri/card0` и весь
-  `/dev/input` в CT уже есть (terraform + `lxc-usb-passthrough.sh`), нужен
-  `/dev/tty7` + правка `logind`. Архитектура пока не выбрана.
-- **USB-контроллер целиком в LXC пробросить нельзя** — это PCI, только VM.
-  `scripts/lxc-usb-passthrough.sh` даёт эквивалент: bind-mount `/dev/bus/usb`,
-  `/dev/input`, `/dev/snd` + cgroup-allow на major 189/13/116/166 → все
-  устройства, hotplug работает. Применяется вне terraform (директории и
-  диапазоны major'ов `device_passthrough` не выражает); повторять после
-  каждого `apply`, который пересоздаёт CT.
-- **`unprivileged = true`**: ноды из bind-mount CT видит как `nobody:nogroup`,
-  поэтому `lxc-usb-passthrough.sh` кладёт на хост udev-правило
-  `MODE="0666"` на `usb`/`input`/`sound`. Запись в общие каталоги с хостом —
-  планировать под idmap `100000+`.
-- **Смена VM → LXC пересоздаёт ресурс** в state-ключе `ubuntu/terraform.tfstate`
-  (разные типы ресурсов, `moved` невозможен).
+- **root@pam-only части конфига CT** — `dev[n]`, `hookscript`, feature-флаги
+  кроме `nesting`. Токен получает 403 (hardcoded в `pve-container`, не роль).
+  Делает `scripts/lxc-ct-passthrough.sh` на ноде. См.
+  [отдельный раздел](#rootpam-ограничения-lxc).
+- **Версия драйвера хост == CT.** Модуль ядра `nvidia` (580.178.04) на хосте, в
+  контейнер идёт только userspace (`--no-kernel-module`). Разъезд →
+  `nvidia-smi` в CT: `Failed to initialize NVML: Driver/library version
+  mismatch`. Обновлять хост и `lxc-ubuntu-desktop-provision.sh` синхронно.
+- **Ядро PVE 9.2 = `7.0.2-6-pve`** (Proxmox перескочил на своё «7.0»). NVIDIA
+  580.178.04 `.run --dkms` собирается и грузится (проверено). Более старые 580.x
+  могут не собраться — брать свежий билд.
+- **`nova_core`** (in-tree Rust-драйвер NVIDIA в ядре 7.0) тоже перехватил бы
+  карту — `lxc-nvidia-host-setup.sh` его блэклистит вместе с `nouveau`.
+- **`nvidia-persistenced`** этот `.run` не ставит юнитом — ноды создают udev +
+  `modules-load.d` + `nvidia-modprobe` из `lxc-nvidia-host-setup.sh`.
+- **Физический монитор из контейнера — нерешённый вопрос.** LXC разделяет карту
+  и по умолчанию не DRM-master. Варианты: (а) headless X + `xrdp`/Sunshine
+  (`lxc-ubuntu-desktop-provision.sh` ставит оба), (б) свой Xorg на seat0 —
+  `/dev/dri/card0` + `/dev/input` в CT есть, нужен `/dev/tty7` + `logind`.
+- **USB-контроллер целиком в LXC — нельзя** (PCI, только VM). Эквивалент:
+  bind-mount `/dev/bus/usb` + `/dev/input` + `/dev/snd` + cgroup major
+  189/13/116/166 → все устройства, hotplug. + host-udev `MODE="0666"` (иначе
+  unprivileged CT видит ноды как `nobody:nogroup`).
+- **Смена VM → LXC пересоздаёт ресурс** (разные типы, `moved` невозможен). У
+  `env/ubuntu` стейт был пустой (VM-версию не применяли), так что 1 to add.
 
 ## Установка Windows с нуля
 
@@ -633,31 +680,40 @@ OVMF без GOP => на экране установщика ничего не в
 
 ## Установка Ubuntu с нуля (LXC)
 
-Хост уже в режиме B (`lxc-nvidia-host-setup.sh` + reboot, `nvidia-smi` работает).
+```bash
+# 0. Хост -> режим nvidia (разово, без reboot)
+ssh bare-pve 'NVIDIA_VERSION=580.178.04 bash -s' < scripts/lxc-nvidia-host-setup.sh
+ssh bare-pve nvidia-smi   # NVIDIA GeForce GTX 950
 
-1. Разложить арбитр на ноду (разово):
-   `ssh root@bare-pve 'cd /root && bash install-gpu-arbiter.sh'` — см.
-   [Переключение ОС → Установка](#установка-разово-на-ноду).
-2. Скачать шаблон на ноде:
-   `pveam update && pveam download local ubuntu-26.04-standard_26.04-1_amd64.tar.zst`
-   (уточнить имя через `pveam available --section system | grep ubuntu`).
-3. `terraform -chdir=env/ubuntu apply` — CT создаётся **выключенным**
-   (`start_on_boot=false`), с GPU/DRI-нодами и `hookscript:` в конфиге.
-4. Весь USB/input/sound (вне terraform, идемпотентно):
-   `ssh bare-pve scripts/lxc-usb-passthrough.sh <ctid>`
-5. Первый старт — просто `pct start <ctid>` (или кнопкой в веб-морде): pre-start
-   хук перекинет карту с vfio-pci на nvidia и стартанёт CT. `workstation.sh
-   start ubuntu` — то же плюс `--force`.
-6. Провижн внутри CT:
-   ```bash
-   pct push <ctid> scripts/lxc-ubuntu-desktop-provision.sh /root/provision.sh
-   pct exec <ctid> -- env NVIDIA_VERSION=580.xx.xx bash /root/provision.sh
-   pct reboot <ctid>
-   ```
-   Ставит `ubuntu-desktop-minimal`, `xrdp` (если `ENABLE_XRDP=1`) и userspace-драйвер.
-7. Пользователь: `pct exec <ctid> -- adduser <you> && pct exec <ctid> -- usermod -aG sudo <you>`.
-8. Проверка GPU в CT: `pct exec <ctid> -- nvidia-smi`; `glxinfo -B` в сессии
-   должен показать `OpenGL renderer: NVIDIA ...`.
+# 1. Арбитр + скрипты на ноду (разово)
+scp scripts/{gpu-arbiter,workstation,install-gpu-arbiter,lxc-ct-passthrough,lxc-ubuntu-desktop-provision}.sh \
+    scripts/workstation-resume.service root@bare-pve:/root/
+ssh bare-pve 'cd /root && bash install-gpu-arbiter.sh'
+
+# 2. Шаблон (обычный minimal rootfs, не cloud)
+ssh bare-pve 'pveam update && pveam download local ubuntu-26.04-standard_26.04-1_amd64.tar.zst'
+
+# 3. Terraform создаёт CT (токеном; только nesting из feature-флагов)
+source scripts/apply-wrapper.sh && terraform -chdir=env/ubuntu apply
+
+# 4. root@pam-биты на ноде: GPU dev[n] + features + hookscript + USB
+ssh bare-pve 'bash /root/lxc-ct-passthrough.sh <ctid>'
+
+# 5. Рестарт -> pre-start хук проверит режим и стартанёт
+ssh bare-pve 'pct stop <ctid>; pct start <ctid>'   # или: workstation.sh start ubuntu
+
+# 6. Провижн десктопа внутри CT (~20-30 мин)
+ssh bare-pve 'pct push <ctid> /root/lxc-ubuntu-desktop-provision.sh /root/provision.sh
+              pct exec <ctid> -- env NVIDIA_VERSION=580.178.04 bash /root/provision.sh'
+# ubuntu-desktop-minimal + userspace NVIDIA + xrdp + Sunshine + Steam + Discord + VS Code
+
+# 7. Пользователь + проверка
+ssh bare-pve 'pct exec <ctid> -- bash -c "adduser <you> && usermod -aG sudo,video,render,audio <you>"'
+ssh bare-pve 'pct exec <ctid> -- nvidia-smi'
+```
+
+Доступ: RDP на `<ct-ip>:3389`, либо Sunshine web UI `https://<ct-ip>:47990`
+(Moonlight-клиенты).
 
 ## Code 43
 
