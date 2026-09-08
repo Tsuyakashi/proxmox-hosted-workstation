@@ -46,8 +46,11 @@ GPU_NODES=(/dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/
            /dev/dri/card0 /dev/dri/renderD128)
 for n in /dev/nvidia-caps/nvidia-cap*; do [ -e "$n" ] && GPU_NODES+=("$n"); done
 
-BEGIN="# --- workstation usb/input/snd passthrough (lxc-ct-passthrough.sh) ---"
-END="# --- end workstation usb/input/snd passthrough ---"
+BEGIN="# --- workstation seat: usb/input/snd + physical console (lxc-ct-passthrough.sh) ---"
+END="# --- end workstation seat ---"
+# older marker (pre-seat) — also stripped so upgrades are clean
+OLD_BEGIN="# --- workstation usb/input/snd passthrough (lxc-ct-passthrough.sh) ---"
+OLD_END="# --- end workstation usb/input/snd passthrough ---"
 
 pct_running() { pct status "$CTID" 2>/dev/null | grep -q running; }
 if pct_running; then
@@ -102,10 +105,17 @@ else
 fi
 
 # ------------------------------------------------------------
-# 4. USB / input / sound directories (no dev[n] equivalent) -> raw lxc.*
+# 4. Raw lxc.* — things dev[n] can't express:
+#    - USB / input / sound *directories* (bind + cgroup major ranges)
+#    - the physical seat: framebuffer + VTs so an Xorg inside the CT can
+#      become DRM-master and light the monitors. NOTE: never bind /dev/console
+#      or /dev/tty0 — LXC owns those and it fails the container with
+#      `sync_wait: 34`. tty1/tty2/tty7 + fb0 are enough (Xorg runs with
+#      -keeptty, so it never VT-switches).
 # ------------------------------------------------------------
 tmp=$(mktemp)
-awk -v b="$BEGIN" -v e="$END" '$0==b{drop=1} drop==0{print} $0==e{drop=0}' "$CONF" >"$tmp"
+awk -v b="$BEGIN" -v e="$END" -v ob="$OLD_BEGIN" -v oe="$OLD_END" '
+  $0==b || $0==ob {drop=1} drop==0{print} $0==e || $0==oe {drop=0}' "$CONF" >"$tmp"
 if [ "$MODE" = add ] && [ "$WITH_USB" = 1 ]; then
   cat >>"$tmp" <<EOF
 $BEGIN
@@ -113,13 +123,20 @@ lxc.cgroup2.devices.allow: c 189:* rwm
 lxc.cgroup2.devices.allow: c 13:* rwm
 lxc.cgroup2.devices.allow: c 116:* rwm
 lxc.cgroup2.devices.allow: c 166:* rwm
+lxc.cgroup2.devices.allow: c 4:* rwm
+lxc.cgroup2.devices.allow: c 29:* rwm
+lxc.cgroup2.devices.allow: c 226:* rwm
 lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0
+lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir 0 0
+lxc.mount.entry: /dev/fb0 dev/fb0 none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/tty7 dev/tty7 none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/vga_arbiter dev/vga_arbiter none bind,optional,create=file 0 0
 $END
 EOF
 fi
-cmp -s "$tmp" "$CONF" || { cat "$tmp" >"$CONF"; echo "  usb/input/snd raw lxc.*: ${MODE}"; }
+cmp -s "$tmp" "$CONF" || { cat "$tmp" >"$CONF"; echo "  raw lxc.* seat block: ${MODE}"; }
 rm -f "$tmp"
 
 # host udev perms — an unprivileged CT sees bind-mounted nodes as nobody:nogroup
@@ -129,7 +146,13 @@ if [ "$MODE" = add ] && [ "$WITH_USB" = 1 ]; then
 SUBSYSTEM=="usb", MODE="0666"
 SUBSYSTEM=="input", MODE="0666"
 SUBSYSTEM=="sound", MODE="0666"
+SUBSYSTEM=="graphics", MODE="0666"
 KERNEL=="ttyACM[0-9]*", MODE="0666"
+KERNEL=="tty[0-9]*", MODE="0666"
+KERNEL=="fb[0-9]*", MODE="0666"
+KERNEL=="vga_arbiter", MODE="0666"
+KERNEL=="card[0-9]*", SUBSYSTEM=="drm", MODE="0666"
+KERNEL=="renderD[0-9]*", SUBSYSTEM=="drm", MODE="0666"
 EOF
   udevadm control --reload && udevadm trigger
   echo "  udev: $UDEV"
