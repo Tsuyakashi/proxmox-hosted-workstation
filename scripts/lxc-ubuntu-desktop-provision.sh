@@ -72,8 +72,17 @@ else
   [ -f "$RUN" ] || curl -fL --progress-bar -o "$RUN" "${RUN_URL_BASE}/${NVIDIA_VERSION}/NVIDIA-Linux-x86_64-${NVIDIA_VERSION}.run"
   # 32-bit libs are needed by Steam/Proton.
   dpkg --add-architecture i386
+  apt-get update
   sh "$RUN" --silent --no-kernel-module --no-drm --install-libglvnd \
     --install-compat32-libs --no-questions --ui=none
+  # The .run's --install-libglvnd overwrites the distro GLVND dispatch libs with
+  # a partial set -> Mesa/llvmpipe apps (Sunshine, some Electron) hit
+  # `undefined symbol: _glapi_tls_Current`. Restore the distro dispatch; the
+  # NVIDIA vendor libs (libGLX_nvidia / libEGL_nvidia) keep working via GLVND.
+  apt-get install --reinstall -y \
+    libglvnd0 libglx0 libgl1 libopengl0 libegl1 libgles2 \
+    libglvnd0:i386 libgl1:i386 libglx0:i386
+  ldconfig
 fi
 
 # ------------------------------------------------------------
@@ -120,11 +129,18 @@ fi
 # ------------------------------------------------------------
 if [ "$INSTALL_SUNSHINE" = 1 ]; then
   log "sunshine"
-  SUN_URL="$(curl -fsSL https://api.github.com/repos/LizardByte/Sunshine/releases/latest \
-    | grep -oP 'https://[^"]*sunshine-ubuntu-24\.04-amd64\.deb' | head -1 || true)"
-  [ -n "$SUN_URL" ] || SUN_URL="https://github.com/LizardByte/Sunshine/releases/latest/download/sunshine-ubuntu-24.04-amd64.deb"
-  curl -fL -o /root/sunshine.deb "$SUN_URL"
-  apt-get install -y /root/sunshine.deb || true
+  set +e
+  REL="$(. /etc/os-release; echo "${VERSION_ID:-24.04}")"
+  API=$(curl -fsSL https://api.github.com/repos/LizardByte/Sunshine/releases/latest)
+  # LizardByte asset: sunshine_<ver>-1+ubuntu<rel>_amd64.deb  (fall back 24.04)
+  SUN_URL=$(printf '%s' "$API" | grep -oE "https://[^\"]+ubuntu${REL}_amd64\.deb" | head -1)
+  [ -n "$SUN_URL" ] || SUN_URL=$(printf '%s' "$API" | grep -oE 'https://[^"]+ubuntu24\.04_amd64\.deb' | head -1)
+  if [ -n "$SUN_URL" ] && curl -fL -o /root/sunshine.deb "$SUN_URL"; then
+    apt-get install -y /root/sunshine.deb || echo "[provision] sunshine dpkg failed — skip"
+  else
+    echo "[provision] sunshine: no matching .deb for $REL — skip (install by hand if wanted)"
+  fi
+  set -e
 fi
 
 # ------------------------------------------------------------
@@ -132,7 +148,7 @@ fi
 # ------------------------------------------------------------
 echo ""
 echo "=== checks ==="
-ls -l /dev/nvidia* /dev/dri 2>&1 || echo "!! GPU nodes missing — check device_passthrough + host driver"
+ls -l /dev/nvidia* /dev/dri 2>&1 || echo "!! GPU nodes missing — check lxc-ct-passthrough.sh + host driver"
 nvidia-smi || echo "!! nvidia-smi failed — version mismatch with host, or nodes not passed"
 echo ""
 echo "Done. Then:  pct reboot <ctid>"
