@@ -39,7 +39,7 @@ variable "cores" {
 
 variable "memory" {
   type    = number
-  default = 8192
+  default = 12288
 }
 
 variable "agent_enabled" {
