@@ -39,6 +39,9 @@ fi
 [ -n "$ARBITER" ] || die "gpu-arbiter.sh not found — run scripts/install-gpu-arbiter.sh on the node"
 
 take_lock() { exec 9>"$LOCK_FILE"; flock -w 300 9 || die "another workstation.sh / gpu-arbiter operation is in progress"; }
+drop_lock() { exec 9>&- 2>/dev/null || true; }   # MUST release before qm/pct start —
+                                                 # the Proxmox-spawned pre-start hook
+                                                 # takes this same lock in its own process
 
 win_vmid() { grep -sl "^name: ${WIN_NAME}\$"    /etc/pve/qemu-server/*.conf 2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
 ct_vmid()  { grep -sl "^hostname: ${CT_NAME}\$" /etc/pve/lxc/*.conf         2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
@@ -87,6 +90,11 @@ cmd_start() { # $1 target  [$2 --force|--via-reboot]
   fi
 
   do_switch "$target" "$via" || die "cannot give the hardware to $target (try: $0 switch $target --via-reboot)"
+
+  # Release the lock BEFORE qm/pct start: Proxmox spawns the gpu-arbiter
+  # pre-start hook as a separate process that grabs this same lock — holding it
+  # here would deadlock it for flock's 300s timeout.
+  drop_lock
 
   if [ "$target" = windows ]; then
     [ -n "$win" ] || die "no VM named '$WIN_NAME'"
