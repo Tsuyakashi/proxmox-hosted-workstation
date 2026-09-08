@@ -84,10 +84,24 @@ _unbind() {
   echo "$d" >"/sys/bus/pci/drivers/$drv/unbind" 2>/dev/null || return 1
 }
 
+_vfio_forget() { # $1 device — drop its id from vfio-pci's dynamic table so a
+  local d=$1 vd dd                                   # probe won't re-grab it
+  vd=$(cat "/sys/bus/pci/devices/$d/vendor" 2>/dev/null); vd=${vd#0x}
+  dd=$(cat "/sys/bus/pci/devices/$d/device" 2>/dev/null); dd=${dd#0x}
+  [ -n "$vd" ] && [ -n "$dd" ] && \
+    echo "$vd $dd" >/sys/bus/pci/drivers/vfio-pci/remove_id 2>/dev/null || true
+}
+
 bind_to() { # $1 device, $2 target driver ("" = clear override -> kernel default match)
   local d=$1 target=${2:-} ovr="/sys/bus/pci/devices/$1/driver_override"
+  # idempotent: nothing to do if already on an acceptable driver
+  if [ -n "$target" ]; then
+    [ "$(cur_driver "$d")" = "$target" ] && return 0
+  else
+    case "$(cur_driver "$d")" in vfio-pci|"(none)") ;; *) return 0 ;; esac
+  fi
   if [ -n "$target" ]; then printf '%s\n' "$target" >"$ovr" 2>/dev/null || true
-  else printf '\n' >"$ovr" 2>/dev/null || true
+  else printf '\n' >"$ovr" 2>/dev/null || true; _vfio_forget "$d"
   fi
   _unbind "$d" || { log "  $d busy (held by $(cur_driver "$d")) — cannot rebind"; return 1; }
   printf '%s\n' "$d" >/sys/bus/pci/drivers_probe 2>/dev/null || true
@@ -108,7 +122,7 @@ switch_to_windows() {
 
 switch_to_ubuntu() {
   log "binding GPU to nvidia, HDMI-audio + USB to native drivers"
-  modprobe "${NVIDIA_MODS[@]}" 2>/dev/null || true
+  modprobe "${NVIDIA_MODS[@]}" snd_hda_intel xhci_pci ehci_pci ehci-pci 2>/dev/null || true
   local d rc=0
   bind_to "$GPU_VGA" nvidia || rc=1
   bind_to "$GPU_AUD" ""     || rc=1                # snd_hda_intel
@@ -130,8 +144,11 @@ switch_to_ubuntu() {
 
 do_switch() { # $1 target  — live rebind only, no guest-running guard (caller's job)
   local target=$1 from; from=$(host_mode)
-  if [ "$from" = "$target" ]; then log "host already in $target mode"; return 0; fi
-  log "swapping host $from -> $target (live PCI rebind)"
+  # Always run the (idempotent) rebind — even when the GPU is already on the
+  # right driver the USB / audio functions may not be (e.g. after a manual
+  # host bring-up).
+  [ "$from" = "$target" ] && log "host GPU already $target — verifying USB/audio" \
+                          || log "swapping host $from -> $target (live PCI rebind)"
   local rc=0
   if [ "$target" = windows ]; then switch_to_windows || rc=$?; else switch_to_ubuntu || rc=$?; fi
   if [ "$rc" -ne 0 ]; then
@@ -165,9 +182,7 @@ hook_prestart() { # $1 = vmid
     exit 1
   fi
 
-  if [ "$(host_mode)" != "$target" ]; then
-    do_switch "$target" || exit 1
-  fi
+  do_switch "$target" || exit 1
   log "pre-start: ok, $me may start"
 }
 

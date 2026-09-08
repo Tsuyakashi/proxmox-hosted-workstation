@@ -96,12 +96,6 @@ variable "ssh_public_keys" {
   default     = []
 }
 
-variable "hook_script_file_id" {
-  description = <<-EOT
-    Proxmox hookscript volume id — the GPU arbiter's pre-start phase. Install
-    the file first with scripts/install-gpu-arbiter.sh (it is not uploaded by
-    Terraform: bpg only does snippets over SSH). null = no hookscript.
-  EOT
-  type        = string
-  default     = "local:snippets/gpu-arbiter.sh"
-}
+# NOTE: hook_script_file_id and device_passthrough are intentionally NOT passed
+# to mod/ct here — Proxmox restricts both to root@pam, so the API token 403s.
+# scripts/lxc-ct-passthrough.sh sets them on the node as root instead.
