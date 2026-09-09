@@ -45,6 +45,10 @@ module "ubuntu_ct" {
   mac              = var.mac
   ipv4_address     = var.ipv4_address
   ipv4_gateway     = var.ipv4_gateway
+  # bare-pve's own resolv.conf points at Tailscale MagicDNS (100.100.100.100),
+  # which a non-Tailscale CT can't reach -> apt/steam/etc. fail on DNS. Give
+  # the CT real resolvers instead of inheriting the node's.
+  nameservers = var.nameservers
 
   ssh_public_keys = var.ssh_public_keys
 

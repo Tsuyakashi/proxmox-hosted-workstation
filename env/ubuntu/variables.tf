@@ -90,6 +90,16 @@ variable "ipv4_gateway" {
   default = null
 }
 
+variable "nameservers" {
+  description = <<-EOT
+    Resolvers for the CT. Must NOT inherit bare-pve's own resolv.conf — it
+    points at Tailscale MagicDNS (100.100.100.100), unreachable from a
+    non-Tailscale container.
+  EOT
+  type        = list(string)
+  default     = ["192.168.100.1", "8.8.8.8", "1.1.1.1"]
+}
+
 variable "ssh_public_keys" {
   description = "Authorized keys for root in the CT (console login also works via `pct enter`)."
   type        = list(string)

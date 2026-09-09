@@ -77,7 +77,12 @@ apt-get install -y --no-install-recommends \
   pipewire pipewire-pulse wireplumber pavucontrol \
   network-manager network-manager-gnome policykit-1-gnome \
   fonts-dejavu fonts-liberation adwaita-icon-theme \
-  curl wget ca-certificates gnupg pciutils kmod file
+  locales curl wget ca-certificates gnupg pciutils kmod file
+
+# generate a UTF-8 locale (zenity / GTK complain about "C" otherwise)
+sed -i 's/^# *\(en_US.UTF-8\)/\1/; s/^# *\(ru_RU.UTF-8\)/\1/' /etc/locale.gen
+locale-gen >/dev/null 2>&1 || true
+update-locale LANG=en_US.UTF-8
 
 # no display manager
 apt-get purge -y gdm3 lightdm sddm 2>/dev/null || true
