@@ -133,7 +133,9 @@ switch_to_ubuntu() {
     echo "$d" >"/sys/bus/pci/devices/$d/driver/unbind" 2>/dev/null || true
   done
   # 2. now the GPU is free -> load nvidia (+ drm with modeset/fbdev for /dev/fb0)
-  modprobe nvidia nvidia_uvm nvidia_modeset 2>/dev/null || true
+  #    `-a`: without it modprobe treats nvidia_uvm / nvidia_modeset as kernel
+  #    params to `nvidia` and silently drops them ("unknown parameter ... ignored").
+  modprobe -a nvidia nvidia_uvm nvidia_modeset 2>/dev/null || true
   modprobe -r nvidia_drm 2>/dev/null || true
   modprobe nvidia_drm modeset=1 fbdev=1 2>/dev/null || modprobe nvidia_drm 2>/dev/null || true
   modprobe snd_hda_intel xhci_pci ehci_pci ehci-pci 2>/dev/null || true
@@ -143,15 +145,24 @@ switch_to_ubuntu() {
   for d in "${USB_FUNCS[@]}"; do
     bind_to "$d" "" || rc=1                        # xhci_pci / ehci-pci / snd_hda_intel
   done
-  nvidia-modprobe -c0 -u -m 2>/dev/null || nvidia-modprobe -c0 -u 2>/dev/null || true
   systemctl start nvidia-persistenced 2>/dev/null || true
   [ "$(cur_driver "$GPU_VGA")" = nvidia ] || { log "  GPU did not bind nvidia"; return 1; }
 
-  # nodes must exist before lxc binds them (hook runs in the host ns, first)
-  local n waited=0
+  # Nodes must exist before lxc binds them (the hook runs in the host ns, first).
+  # nvidia-modprobe is what *creates* /dev/nvidia0 + /dev/nvidiactl; on a cold
+  # post-reboot host the first call races the just-bound driver and creates
+  # nothing, so retry it inside the wait rather than poll for nodes that will
+  # never appear on their own (~15s budget).
+  local n try
+  for try in $(seq 1 30); do
+    nvidia-modprobe -c0 -u -m 2>/dev/null || nvidia-modprobe -c0 -u 2>/dev/null || true
+    local missing=0
+    for n in "${NVIDIA_NODES[@]}"; do [ -e "$n" ] || missing=1; done
+    [ "$missing" -eq 0 ] && break
+    sleep 0.5
+  done
   for n in "${NVIDIA_NODES[@]}"; do
-    while [ ! -e "$n" ] && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
-    [ -e "$n" ] || { log "  $n did not appear after ${waited}00ms"; rc=1; }
+    [ -e "$n" ] || { log "  $n still missing after nvidia-modprobe retries"; rc=1; }
   done
   return $rc
 }
