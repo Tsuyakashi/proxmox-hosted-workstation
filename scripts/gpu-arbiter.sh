@@ -122,18 +122,32 @@ switch_to_windows() {
 
 switch_to_ubuntu() {
   log "binding GPU to nvidia, HDMI-audio + USB to native drivers"
-  modprobe "${NVIDIA_MODS[@]}" snd_hda_intel xhci_pci ehci_pci ehci-pci 2>/dev/null || true
   local d rc=0
+  # 1. FREE the functions from vfio-pci FIRST. `modprobe nvidia` fails with
+  #    "No such device" while vfio-pci still holds the only NVIDIA GPU, and
+  #    then the rebind leaves it unbound. Clear override, forget the id, unbind.
+  for d in "$GPU_VGA" "$GPU_AUD" "${USB_FUNCS[@]}"; do
+    [ "$(cur_driver "$d")" = vfio-pci ] || continue
+    printf '\n' >"/sys/bus/pci/devices/$d/driver_override" 2>/dev/null || true
+    _vfio_forget "$d"
+    echo "$d" >"/sys/bus/pci/devices/$d/driver/unbind" 2>/dev/null || true
+  done
+  # 2. now the GPU is free -> load nvidia (+ drm with modeset/fbdev for /dev/fb0)
+  modprobe nvidia nvidia_uvm nvidia_modeset 2>/dev/null || true
+  modprobe -r nvidia_drm 2>/dev/null || true
+  modprobe nvidia_drm modeset=1 fbdev=1 2>/dev/null || modprobe nvidia_drm 2>/dev/null || true
+  modprobe snd_hda_intel xhci_pci ehci_pci ehci-pci 2>/dev/null || true
+  # 3. bind
   bind_to "$GPU_VGA" nvidia || rc=1
   bind_to "$GPU_AUD" ""     || rc=1                # snd_hda_intel
   for d in "${USB_FUNCS[@]}"; do
     bind_to "$d" "" || rc=1                        # xhci_pci / ehci-pci / snd_hda_intel
   done
-  nvidia-modprobe -c0 -u -m 2>/dev/null || nvidia-modprobe -c0 -u 2>/dev/null || true  # (re)create /dev/nvidia* nodes without X
+  nvidia-modprobe -c0 -u -m 2>/dev/null || nvidia-modprobe -c0 -u 2>/dev/null || true
   systemctl start nvidia-persistenced 2>/dev/null || true
-  [ "$(cur_driver "$GPU_VGA")" = nvidia ] || return 1
+  [ "$(cur_driver "$GPU_VGA")" = nvidia ] || { log "  GPU did not bind nvidia"; return 1; }
 
-  # The CT's dev[n]: passthrough needs the nodes to exist before lxc setup runs.
+  # nodes must exist before lxc binds them (hook runs in the host ns, first)
   local n waited=0
   for n in "${NVIDIA_NODES[@]}"; do
     while [ ! -e "$n" ] && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done

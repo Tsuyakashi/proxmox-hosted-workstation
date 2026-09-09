@@ -18,10 +18,14 @@ set -euo pipefail
 # The node CLI (`pct set`) runs as root@pam, so it applies all of them.
 # Terraform still creates the CT + sets `nesting` (the one token-safe flag).
 #
-# GPU device nodes go in via the NATIVE `pct set --devN` (Proxmox then handles
-# the cgroup allow + mount + unprivileged-CT node perms itself). The USB / input
-# / sound *directories* have no `dev[n]` equivalent, so those few lines are
-# appended to /etc/pve/lxc/<ctid>.conf raw (the classic pre-8.2 method).
+# EVERYTHING device-related goes in as raw `lxc.mount.entry ... bind,optional`
+# + `lxc.cgroup2.devices.allow`, NOT `pct set --devN`. `dev[n]` paths are
+# validated by `pct start` BEFORE the pre-start hook runs, so with the GPU
+# still on vfio-pci a plain start / web-UI Start fails ("Device ... does not
+# exist") and the arbiter never gets to rebind. Raw lxc lines are not
+# pre-validated; the hook (host ns, runs first) creates the nodes, then lxc
+# binds them. Host udev makes the nodes 0666 (unprivileged CT sees bind mounts
+# as nobody:nogroup otherwise).
 #
 # Re-run after any `terraform apply` that recreates the CT.
 # ============================================================
@@ -42,10 +46,6 @@ HOOK="local:snippets/gpu-arbiter.sh"
 CONF="/etc/pve/lxc/${CTID}.conf"
 [ -f "$CONF" ] || { echo "error: $CONF not found (is the CT created?)" >&2; exit 1; }
 
-GPU_NODES=(/dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools
-           /dev/dri/card0 /dev/dri/renderD128)
-for n in /dev/nvidia-caps/nvidia-cap*; do [ -e "$n" ] && GPU_NODES+=("$n"); done
-
 BEGIN="# --- workstation seat: usb/input/snd + physical console (lxc-ct-passthrough.sh) ---"
 END="# --- end workstation seat ---"
 # older marker (pre-seat) — also stripped so upgrades are clean
@@ -58,25 +58,18 @@ if pct_running; then
 fi
 
 # ------------------------------------------------------------
-# 1. GPU device nodes -> native `pct set --devN`
+# 1. drop any `dev[n]:` — the GPU goes in via raw lxc.mount.entry (section 4)
 # ------------------------------------------------------------
-# Wipe any devN we manage, then re-add. (Proxmox has no "list my devN", so we
-# clear a generous range and rebuild deterministically from index 0.)
-if [ "$MODE" = add ]; then
-  DEL=(); for i in $(seq 0 31); do grep -q "^dev${i}:" "$CONF" && DEL+=("dev${i}"); done
-  [ "${#DEL[@]}" -gt 0 ] && pct set "$CTID" --delete "$(IFS=,; echo "${DEL[*]}")" >/dev/null || true
-  i=0
-  for n in "${GPU_NODES[@]}"; do
-    [ -e "$n" ] || { echo "  skip (absent): $n"; continue; }
-    pct set "$CTID" "--dev${i}" "${n},mode=0666" >/dev/null
-    echo "  dev${i} = ${n}"
-    i=$((i + 1))
-  done
-else
-  DEL=(); for i in $(seq 0 31); do grep -q "^dev${i}:" "$CONF" && DEL+=("dev${i}"); done
-  [ "${#DEL[@]}" -gt 0 ] && pct set "$CTID" --delete "$(IFS=,; echo "${DEL[*]}")" >/dev/null || true
-  echo "  removed all devN"
-fi
+# WHY NOT `pct set --devN`: `pct start` (and the web-UI Start button) validate
+# every dev[n] PATH before invoking lxc-start — i.e. before the gpu-arbiter
+# pre-start hook can rebind the card to nvidia. So on a plain start with the
+# GPU still on vfio-pci you get `TASK ERROR: Device /dev/dri/card0 does not
+# exist` and the hook never runs. Raw `lxc.mount.entry ... bind,optional` is
+# NOT pre-validated: lxc parses it, the pre-start hook (which runs first, in
+# the host ns) rebinds + creates the nodes, then lxc's mount phase binds them.
+DEL=(); for i in $(seq 0 31); do grep -q "^dev${i}:" "$CONF" && DEL+=("dev${i}"); done
+[ "${#DEL[@]}" -gt 0 ] && pct set "$CTID" --delete "$(IFS=,; echo "${DEL[*]}")" >/dev/null || true
+[ "${#DEL[@]}" -gt 0 ] && echo "  removed ${#DEL[@]} dev[n] entries"
 
 # ------------------------------------------------------------
 # 2. features (keyctl/fuse — nesting is already set by Terraform)
@@ -119,13 +112,35 @@ awk -v b="$BEGIN" -v e="$END" -v ob="$OLD_BEGIN" -v oe="$OLD_END" '
 if [ "$MODE" = add ] && [ "$WITH_USB" = 1 ]; then
   cat >>"$tmp" <<EOF
 $BEGIN
+# GPU: nvidia (195), drm (226), nvidia-caps (236). nvidia-uvm's major is
+# DYNAMIC (kernel allocates it high) — allow a range that covers it (seen
+# 509/511); if it lands outside 505-511 after a host reboot, widen this.
+lxc.cgroup2.devices.allow: c 195:* rwm
+lxc.cgroup2.devices.allow: c 226:* rwm
+lxc.cgroup2.devices.allow: c 234:* rwm
+lxc.cgroup2.devices.allow: c 235:* rwm
+lxc.cgroup2.devices.allow: c 236:* rwm
+lxc.cgroup2.devices.allow: c 237:* rwm
+lxc.cgroup2.devices.allow: c 505:* rwm
+lxc.cgroup2.devices.allow: c 506:* rwm
+lxc.cgroup2.devices.allow: c 507:* rwm
+lxc.cgroup2.devices.allow: c 508:* rwm
+lxc.cgroup2.devices.allow: c 509:* rwm
+lxc.cgroup2.devices.allow: c 510:* rwm
+lxc.cgroup2.devices.allow: c 511:* rwm
+lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir 0 0
+# USB (189) / input (13) / ALSA (116) / usb-ACM (166) / tty (4) / fb (29)
 lxc.cgroup2.devices.allow: c 189:* rwm
 lxc.cgroup2.devices.allow: c 13:* rwm
 lxc.cgroup2.devices.allow: c 116:* rwm
 lxc.cgroup2.devices.allow: c 166:* rwm
 lxc.cgroup2.devices.allow: c 4:* rwm
 lxc.cgroup2.devices.allow: c 29:* rwm
-lxc.cgroup2.devices.allow: c 226:* rwm
 lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0
