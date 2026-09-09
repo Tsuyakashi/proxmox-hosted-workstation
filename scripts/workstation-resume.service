@@ -1,0 +1,24 @@
+# Finishes a `workstation.sh switch --via-reboot` after the node comes back up:
+# reads /var/lib/workstation/pending-start and starts that guest once the host
+# is in a clean post-boot state (no driver holds the GPU yet, so the live
+# rebind always succeeds).
+#
+# Install:
+#   install -m 0755 scripts/workstation.sh /usr/local/sbin/workstation.sh
+#   install -m 0644 scripts/workstation-resume.service \
+#       /etc/systemd/system/workstation-resume.service
+#   systemctl daemon-reload && systemctl enable workstation-resume.service
+
+[Unit]
+Description=Resume workstation guest after a GPU-mode switch reboot
+After=pve-guests.service network-online.target
+Wants=pve-guests.service
+ConditionPathExists=/var/lib/workstation/pending-start
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/workstation.sh resume
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

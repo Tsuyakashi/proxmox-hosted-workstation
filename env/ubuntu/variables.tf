@@ -27,7 +27,7 @@ variable "proxmox_api_token" {
   sensitive = true
 }
 
-variable "vm_name" {
+variable "ct_name" {
   type    = string
   default = "ubuntu-workstation"
 }
@@ -38,27 +38,64 @@ variable "cores" {
 }
 
 variable "memory" {
+  description = "RAM in MiB. Matches env/windows (they never run at the same time)."
+  type        = number
+  default     = 12288
+}
+
+variable "swap" {
   type    = number
-  default = 8192
+  default = 0
 }
 
-variable "agent_enabled" {
-  type    = bool
-  default = false
+variable "unprivileged" {
+  description = "Keep true; the GPU nodes come in at mode 0666. See mod/ct."
+  type        = bool
+  default     = true
 }
 
-variable "iso_file_id" {
-  type    = string
-  default = "local:iso/ubuntu-26.04-desktop-amd64.iso"
+variable "template_file_id" {
+  description = <<-EOT
+    LXC template volume id (a minimal rootfs tarball, not a cloud image).
+    On the node:
+      pveam update
+      pveam available --section system | grep ubuntu
+      pveam download local ubuntu-26.04-standard_26.04-1_amd64.tar.zst
+    Adjust the exact filename to whatever `pveam available` lists.
+  EOT
+  type        = string
+  default     = "local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst"
+}
+
+variable "disk_size" {
+  description = "rootfs GiB. A full GNOME + NVIDIA userspace + toolchain needs ~15 GiB; 40 leaves headroom."
+  type        = number
+  default     = 40
 }
 
 variable "mac" {
-  description = "Must differ from every other VM on the bridge (env/windows uses BC:24:11:F9:5D:82)."
+  description = "Differs from every other guest on vmbr0 (env/windows uses BC:24:11:F9:5D:82)."
   type        = string
   default     = "BC:24:11:AB:CD:01"
 }
 
-variable "os_type" {
-  type    = string
-  default = "l26"
+variable "ipv4_address" {
+  description = "\"dhcp\" or a static CIDR."
+  type        = string
+  default     = "dhcp"
 }
+
+variable "ipv4_gateway" {
+  type    = string
+  default = null
+}
+
+variable "ssh_public_keys" {
+  description = "Authorized keys for root in the CT (console login also works via `pct enter`)."
+  type        = list(string)
+  default     = []
+}
+
+# NOTE: hook_script_file_id and device_passthrough are intentionally NOT passed
+# to mod/ct here — Proxmox restricts both to root@pam, so the API token 403s.
+# scripts/lxc-ct-passthrough.sh sets them on the node as root instead.

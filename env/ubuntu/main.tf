@@ -1,65 +1,60 @@
-# Ubuntu 26.04 desktop workstation on bare-pve.
+# Ubuntu desktop workstation on bare-pve — an LXC container, not a VM.
 #
-# This env owns the cluster PCI mappings (manage_mappings = true). env/windows
-# targets the same physical devices, so the two are MUTUALLY EXCLUSIVE — only
-# one may be applied at a time; whichever is applied owns the mappings.
+# Why a container:
+#   - No vfio, no OVMF, no Code 43, no "monitor dark until the driver loads".
+#     The CT shares the host's NVIDIA kernel driver; only the userspace driver
+#     (same version, --no-kernel-module) goes inside.
+#   - The GPU is handed in as plain device nodes (/dev/nvidia*, /dev/dri/*),
+#     so `terraform apply` no longer fights the host over PCI ownership.
 #
-# Booting: OVMF has no GOP for the GTX 950 (no UEFI vBIOS), so the physical
-# monitor stays dark through OVMF/GRUB. The in-tree nouveau driver lights it
-# up once KMS initialises — no Code 43 games, unlike Windows. Keyboard/mouse
-# come from the passed-through USB controllers.
+# HARD REQUIREMENT — host must run the NVIDIA driver, NOT vfio-pci:
+#   This is the exact opposite of scripts/iommu-vfio-setup.sh. The GPU on
+#   bare-pve can be bound to vfio-pci (for env/windows) OR to nvidia (for this
+#   CT), never both. env/windows and env/ubuntu are mutually exclusive and
+#   NEITHER autostarts. The gpu-arbiter.sh hookscript (pre-start) rebinds the
+#   GPU/USB on `pct start` and aborts the start if the Windows VM is running;
+#   scripts/workstation.sh is the CLI on top. See README "Переключение ОС".
+#
+# The .tar.zst template is a standard minimal Ubuntu rootfs (NOT a cloud
+# image); ubuntu-desktop + the NVIDIA userspace driver are installed on first
+# boot by scripts/lxc-ubuntu-desktop-provision.sh (run inside the CT).
+#
+# DEVICE PASSTHROUGH + HOOKSCRIPT ARE NOT SET HERE. Proxmox hard-codes both
+# `dev[n]:` (device_passthrough) and `hookscript:` to root@pam only — no role
+# privilege grants them, so the API token this project uses gets HTTP 403.
+# Both are applied out of band as root on the node:
+#
+#   ssh bare-pve scripts/lxc-ct-passthrough.sh <ctid>
+#
+# which writes raw `lxc.*` GPU/DRI (+ USB/input/snd) lines and runs
+# `pct set <ctid> --hookscript local:snippets/gpu-arbiter.sh`. Re-run after any
+# `terraform apply` that recreates the CT.
 
-module "ubuntu_vm" {
-  source    = "../../mod/vm"
-  name      = var.vm_name
+module "ubuntu_ct" {
+  source    = "../../mod/ct"
+  name      = var.ct_name
   node_name = var.proxmox_node
 
-  cores          = var.cores
-  memory         = var.memory
-  mac            = var.mac
-  os_type        = var.os_type
-  agent_enabled  = var.agent_enabled
-  iso_file_id    = var.iso_file_id
-  disk_interface = "scsi0"
-  disk_size      = 64
-  network_model  = "virtio"
+  cores            = var.cores
+  memory           = var.memory
+  swap             = var.swap
+  unprivileged     = var.unprivileged
+  template_file_id = var.template_file_id
+  os_type          = "ubuntu"
+  disk_size        = var.disk_size
+  mac              = var.mac
+  ipv4_address     = var.ipv4_address
+  ipv4_gateway     = var.ipv4_gateway
 
-  passthrough = [
-    {
-      name         = "gtx950"
-      path         = "0000:01:00"
-      id           = "10de:1402"
-      subsystem_id = "10de:1402"
-      iommu_group  = 1
-      primary_gpu  = true
-    },
-    {
-      name         = "usb-xhci"
-      path         = "0000:00:14.0"
-      id           = "8086:8c31"
-      subsystem_id = "1849:8c31"
-      iommu_group  = 2
-    },
-    {
-      name         = "usb-ehci1"
-      path         = "0000:00:1d.0"
-      id           = "8086:8c26"
-      subsystem_id = "1849:8c26"
-      iommu_group  = 8
-    },
-    {
-      name         = "usb-ehci2"
-      path         = "0000:00:1a.0"
-      id           = "8086:8c2d"
-      subsystem_id = "1849:8c2d"
-      iommu_group  = 4
-    },
-    {
-      name         = "onboard-audio"
-      path         = "0000:00:1b.0"
-      id           = "8086:8c20"
-      subsystem_id = "1849:7662"
-      iommu_group  = 5
-    },
-  ]
+  ssh_public_keys = var.ssh_public_keys
+
+  # Lifecycle is external (gpu-arbiter.sh pre-start hook + workstation.sh CLI).
+  start_on_boot = false
+
+  tags = ["workstation", "gpu", "ubuntu"]
+
+  # Only features.nesting is set here (all Terraform can do with a token).
+  # keyctl + fuse + the GPU/USB dev lines + the hookscript are added on the
+  # node by scripts/lxc-ct-passthrough.sh — all four are hard-coded root@pam
+  # in pve-container (verified in src/PVE/LXC.pm), no role grants them.
 }

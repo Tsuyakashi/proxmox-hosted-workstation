@@ -37,6 +37,21 @@ variable "agent_enabled" {
   default     = false
 }
 
+variable "on_boot" {
+  description = <<-EOT
+    Start this VM automatically when the node boots. Set false when an external
+    switch (scripts/workstation.sh) owns the lifecycle — the workstation guests
+    are mutually exclusive over one GPU and must not race to grab it at boot.
+  EOT
+  type        = bool
+  default     = true
+}
+
+# No hook_script_file_id variable — `hookscript:` is root@pam-only for VMs too
+# (qemu-server). The GPU arbiter is attached with `qm set <winid> --hookscript
+# local:snippets/gpu-arbiter.sh` on the node, or skipped in favour of
+# scripts/workstation.sh. See README "root@pam-ограничения LXC".
+
 variable "datastore_id_disk" {
   description = "Datastore для диска VM."
   type        = string
