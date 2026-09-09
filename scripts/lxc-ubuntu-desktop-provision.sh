@@ -84,6 +84,21 @@ sed -i 's/^# *\(en_US.UTF-8\)/\1/; s/^# *\(ru_RU.UTF-8\)/\1/' /etc/locale.gen
 locale-gen >/dev/null 2>&1 || true
 update-locale LANG=en_US.UTF-8
 
+# The CT gets a link-local IPv6 but no global address/route, yet DNS returns
+# AAAA records -> apps try IPv6 first and hit "Connection reset" (Steam's
+# client download, some .deb fetches). Prefer IPv4 + disable v6.
+cat >/etc/gai.conf <<'EOF'
+precedence ::ffff:0:0/96  100
+precedence ::1/128        50
+precedence ::/0           40
+precedence 2002::/16      30
+EOF
+cat >/etc/sysctl.d/99-no-ipv6.conf <<'EOF'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+EOF
+sysctl --system >/dev/null 2>&1 || true
+
 # no display manager
 apt-get purge -y gdm3 lightdm sddm 2>/dev/null || true
 systemctl set-default multi-user.target
@@ -243,6 +258,27 @@ if [ "$INSTALL_STEAM" = 1 ]; then
   app apt-get install -y steam-installer || {
     curl -fL -o /root/steam.deb https://cdn.fastly.steamstatic.com/client/installer/steam.deb && app apt-get install -y /root/steam.deb
   }
+  # Pre-bootstrap the Steam client: the steam-installer wrapper's first run
+  # pops a zenity "Install?" dialog then does a NO-RETRY `curl` — which fails
+  # on this rig's flaky path to repo.steampowered.com. Fetch + unpack it here
+  # (with retries) so the user just logs in.
+  SVER=$(sed -n 's/^version="\(.*\)"/\1/p' /usr/games/steam | head -1)
+  if [ -n "$SVER" ] && ! sudo -u "$SEAT_USER" test -x "${SEAT_HOME}/.steam/debian-installation/steam.sh"; then
+    D="${SEAT_HOME}/.steam/debian-installation"
+    sudo -u "$SEAT_USER" mkdir -p "$D/deb-installer"
+    if sudo -u "$SEAT_USER" curl -4 -fL --retry 20 --retry-all-errors --retry-delay 3 \
+         -o "$D/deb-installer/steam_${SVER}.tar.gz" \
+         "https://repo.steampowered.com/steam/archive/beta/steam_${SVER}.tar.gz"; then
+      sudo -u "$SEAT_USER" tar -C "$D/deb-installer" -zxf "$D/deb-installer/steam_${SVER}.tar.gz" \
+        steam-launcher/bootstraplinux_ubuntu12_32.tar.xz
+      sudo -u "$SEAT_USER" mv "$D/deb-installer/steam-launcher/bootstraplinux_ubuntu12_32.tar.xz" "$D/bootstrap.tar.xz"
+      sudo -u "$SEAT_USER" tar -C "$D" -xf "$D/bootstrap.tar.xz"
+      sudo -u "$SEAT_USER" bash -c "echo $SVER > $D/deb-installer/version"
+      log "steam client pre-bootstrapped ($SVER)"
+    else
+      log "steam client pre-fetch failed — the app will retry on first launch"
+    fi
+  fi
 fi
 
 if [ "$INSTALL_DISCORD" = 1 ]; then
