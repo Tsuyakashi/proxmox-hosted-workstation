@@ -104,8 +104,9 @@ systemctl mask snapd.service snapd.socket snapd.seeded.service \
   snapd.recovery-chooser-trigger.service snapd.snap-repair.timer \
   snapd.system-shutdown.service 2>/dev/null || true
 
-log "apt update + full-upgrade"
+log "apt update + full-upgrade + base tools"
 apt-get update
+apt-get install -y curl wget ca-certificates gnupg software-properties-common
 apt-get -y full-upgrade
 
 log "ubuntu-desktop (full GNOME + GDM) — big download; snap parts are no-ops"
