@@ -49,9 +49,15 @@ variable "swap" {
 }
 
 variable "unprivileged" {
-  description = "Keep true; the GPU nodes come in at mode 0666. See mod/ct."
+  description = <<-EOT
+    FALSE = privileged. A full Ubuntu GNOME / GDM desktop needs a real
+    systemd-logind graphical session + seat + working udev, which an
+    unprivileged Proxmox CT does not give. See mod/ct's `unprivileged` for the
+    trade-off (container root == host root on the shared kernel; accepted here
+    for a single-user workstation whose Windows half is an isolated VM).
+  EOT
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "template_file_id" {
@@ -68,9 +74,9 @@ variable "template_file_id" {
 }
 
 variable "disk_size" {
-  description = "rootfs GiB. A full GNOME + NVIDIA userspace + toolchain needs ~15 GiB; 40 leaves headroom."
+  description = "rootfs GiB. Full ubuntu-desktop + snap + NVIDIA userspace + Steam/Discord/Chrome/VS Code + a game or two -> 64."
   type        = number
-  default     = 40
+  default     = 64
 }
 
 variable "mac" {
