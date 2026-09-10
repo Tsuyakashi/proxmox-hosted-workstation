@@ -672,6 +672,13 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
   - Ввод — **evdev**, не libinput (тот не стартует без udev, которого в CT
     нет). `gen-xorg-input` строит явные `InputDevice` из
     `/proc/bus/input/devices` перед каждым стартом X.
+  - Звук — та же история: ALSA-монитор WirePlumber ходит через udev, поэтому
+    `wpctl status` пустой (только Dummy Output), хотя `aplay -l` видит все
+    карты. `gen-pw-alsa` строит явные PipeWire-ноды (`adapter` /
+    `api.alsa.pcm.sink`+`.source`, `hw:<имя-карты>`) в
+    `~/.config/pipewire/pipewire.conf.d/99-lxc-alsa.conf` (HDMI-звук GPU
+    пропускается). Перевтыкнул другую карту — `sudo gen-pw-alsa` + рестарт
+    сессии.
   - Раскладку мониторов (лево/право, Гц) один раз в XFCE «Дисплей» — сохраняется.
 - **USB-контроллер целиком в LXC — нельзя** (PCI, только VM). Эквивалент:
   bind-mount `/dev/bus/usb` + `/dev/input` + `/dev/snd` + cgroup major
