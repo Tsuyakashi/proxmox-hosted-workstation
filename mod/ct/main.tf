@@ -115,12 +115,18 @@ resource "proxmox_virtual_environment_container" "this" {
     # console: `pct create` stamps tty/cmode defaults the token can't manage.
     # initialization[0].dns: searchdomain is set once at create; a perpetual
     #   diff over it isn't worth it.
+    # hook_script_file_id / description: set on the node by
+    #   lxc-ct-passthrough.sh (the hookscript is root@pam; `description` is
+    #   just the `#` comment lines of the raw seat block, which the provider
+    #   surfaces as the CT description). Terraform must not strip either.
     ignore_changes = [
       operating_system[0].template_file_id,
       started,
       features,
       console,
       initialization[0].dns,
+      hook_script_file_id,
+      description,
     ]
   }
 }
