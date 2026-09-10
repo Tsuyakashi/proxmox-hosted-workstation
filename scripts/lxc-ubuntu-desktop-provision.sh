@@ -341,7 +341,7 @@ chown -R "$SEAT_USER:$SEAT_USER" "${SEAT_HOME}/.config/systemd"
 # ------------------------------------------------------------
 app() { set +e; "$@"; set -e; }
 
-if [ "$INSTALL_STEAM" = 1 ]; then
+if [ "$INSTALL_STEAM" = 1 ] && ! dpkg -l steam-installer 2>/dev/null | grep -q '^ii'; then
   log "steam"
   add-apt-repository -y multiverse || true
   apt-get update
@@ -350,23 +350,24 @@ if [ "$INSTALL_STEAM" = 1 ]; then
   app apt-get install -y steam-installer
 fi
 
-if [ "$INSTALL_DISCORD" = 1 ]; then
+if [ "$INSTALL_DISCORD" = 1 ] && ! dpkg -l discord 2>/dev/null | grep -q '^ii'; then
   log "discord"
   for i in 1 2 3 4 5; do curl -4 -fL --retry 3 -o /root/discord.deb "https://discord.com/api/download?platform=linux&format=deb" && break || sleep 6; done
   [ -s /root/discord.deb ] && app apt-get install -y /root/discord.deb || log "discord skipped"
 fi
 
 install -d -m 0755 /etc/apt/keyrings
-if [ "$INSTALL_CHROME" = 1 ]; then
+addkey() { curl -4 -fsSL "$2" | gpg --batch --yes --dearmor -o "$1"; }
+if [ "$INSTALL_CHROME" = 1 ] && ! command -v google-chrome >/dev/null; then
   log "chrome"
-  curl -4 -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+  app addkey /etc/apt/keyrings/google-chrome.gpg https://dl.google.com/linux/linux_signing_key.pub
   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" >/etc/apt/sources.list.d/google-chrome.list
   apt-get update -qq && app apt-get install -y google-chrome-stable || log "chrome skipped"
 fi
 
-if [ "$INSTALL_VSCODE" = 1 ]; then
+if [ "$INSTALL_VSCODE" = 1 ] && ! command -v code >/dev/null; then
   log "vscode"
-  curl -4 -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+  app addkey /etc/apt/keyrings/microsoft.gpg https://packages.microsoft.com/keys/microsoft.asc
   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" >/etc/apt/sources.list.d/vscode.list
   apt-get update -qq && app apt-get install -y code || log "vscode skipped"
 fi
