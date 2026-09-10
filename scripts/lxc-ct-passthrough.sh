@@ -134,6 +134,12 @@ $BEGIN
 # profiles block enough of GDM / mutter / systemd-logind / snapd that the
 # session never comes up; unconfine it (single-user workstation, own box).
 lxc.apparmor.profile: unconfined
+# Writable /sys so systemd-udevd can coldplug (udevadm trigger needs to write
+# .../uevent). Without it the udev DB stays empty -> libinput sees nothing,
+# and logind's seat0 has no DRM device so a Wayland compositor can't get
+# master. With it, `loginctl seat-status seat0` shows [MASTER] drm:card0 and
+# GNOME/Wayland just works. (proc:rw is the Proxmox default; restated here.)
+lxc.mount.auto: proc:rw sys:rw
 # GPU: nvidia (195), drm (226), nvidia-caps (236). nvidia-uvm's major is
 # DYNAMIC (kernel allocates it high) — allow a range that covers it (seen
 # 509/511); if it lands outside 505-511 after a host reboot, widen this.
@@ -170,9 +176,9 @@ lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/fb0 dev/fb0 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/vga_arbiter dev/vga_arbiter none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/uinput dev/uinput none bind,optional,create=file 0 0
-# Only tty7 for the seat's Xorg (-keeptty -novtswitch). NEVER bind
-# /dev/console, /dev/tty0, or the getty ttys (tty1/tty2 — Proxmox's own
-# `tty: 2` consoles): binding those fails the container with `sync_wait: 34`.
+# Only tty7 for the seat Xorg (runs -keeptty -novtswitch). NEVER bind
+# /dev/console, /dev/tty0, or the getty ttys tty1/tty2 (Proxmox tty: 2) --
+# binding those fails the container at spawn (sync_wait: 34).
 lxc.mount.entry: /dev/tty7 dev/tty7 none bind,optional,create=file 0 0
 $END
 EOF
