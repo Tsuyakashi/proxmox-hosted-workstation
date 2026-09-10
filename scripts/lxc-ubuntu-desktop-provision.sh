@@ -244,11 +244,8 @@ color-scheme='prefer-dark'
 [org/gnome/desktop/input-sources]
 sources=[('xkb', 'us'), ('xkb', 'ru')]
 xkb-options=['grp:alt_shift_toggle']
-
-[org/gnome/mutter]
-experimental-features=[]
 EOF
-dconf update
+dconf update || log "dconf update failed (non-fatal)"
 
 # Monitor layout: AOC 144Hz on HDMI-1 (left, primary), Philips 60Hz on
 # DVI-I-1 (right). GNOME matches on connector+vendor+product+serial; the
