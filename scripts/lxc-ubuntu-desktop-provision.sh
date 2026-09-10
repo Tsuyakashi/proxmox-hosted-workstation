@@ -388,5 +388,7 @@ echo "installed apps: $(dpkg -l steam-installer discord google-chrome-stable cod
 echo ""
 echo "Reboot the CT:  pct reboot <ctid>   (or  workstation.sh start ubuntu  from stopped)"
 echo "GDM autologs '${SEAT_USER}' into a GNOME 50 / Wayland session on the monitors."
-echo "Remote:  xfreerdp3 /v:<ct-ip> /u:${SEAT_USER} /p:<pw> /cert:ignore   (g-r-d RDP :3389, NVENC)"
+echo "Remote:  xfreerdp3 /v:<ct-ip> /u:${SEAT_USER} /p:<pw> /cert:ignore /f /smart-sizing"
+echo "         (g-r-d RDP :3389 NVENC; /f + /smart-sizing fixes client-scale window sizing;"
+echo "          over the tailnet: 'tailscale serve --bg --tcp 3389 tcp://<ct-ip>:3389' on the jump host)"
 echo "Logs:    journalctl -b -u gdm ; journalctl -b _COMM=gnome-shell"

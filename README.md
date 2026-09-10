@@ -703,7 +703,16 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
   - **Удалённый доступ**: `gnome-remote-desktop` RDP на `:3389` (NVENC).
     TLS-серт генерит провижн, а `grdctl enable` + креды ставит
     per-login-юнит `workstation-rdp.service` (нужна живая шина сессии).
-    Клиент: `xfreerdp3 /v:<ct-ip> /u:tsu /p:<pw> /cert:ignore`.
+    По LAN: `xfreerdp3 /v:<ct-ip> /u:tsu /p:<pw> /cert:ignore`.
+    - **Через тайлнет** — на джамп-хосте (`lxc-bare-pve`, CT 400/420 в
+      `iac-proxmox-lab`) один раз пробросить raw-TCP:
+      `tailscale serve --bg --tcp 3389 tcp://<ct-ip>:3389`
+      (`--bg` переживает рестарт CT/tailscaled; RDP шифрует сам, поэтому
+      именно `--tcp`, не `--tls-terminated-tcp`). Затем:
+      `xfreerdp3 /v:lxc-bare-pve.tail65829d.ts.net:3389 /u:tsu /p:workstation /cert:ignore /f /smart-sizing`
+    - **`/f /smart-sizing`** — фикс клиентского масштаба: при display-scale
+      125% окно вылезало за границы экрана и не ресайзилось. `/f` (fullscreen)
+      + `/smart-sizing` (растягивать содержимое под окно) это лечит.
 - **USB-контроллер целиком в LXC — нельзя** (PCI, только VM). Эквивалент:
   bind-mount `/dev/bus/usb` + `/dev/input` + `/dev/snd` + cgroup major
   189/13/116/166 → все устройства, hotplug. В privileged CT ноды приходят
