@@ -60,7 +60,10 @@ module "ubuntu_ct" {
   ssh_public_keys = var.ssh_public_keys
 
   # Lifecycle is external (gpu-arbiter.sh pre-start hook + workstation.sh CLI).
+  # Create it STOPPED — the node still needs lxc-ct-passthrough.sh (GPU/USB +
+  # hookscript + apparmor) before a first start makes sense.
   start_on_boot = false
+  started       = false
 
   tags = ["workstation", "gpu", "ubuntu"]
 

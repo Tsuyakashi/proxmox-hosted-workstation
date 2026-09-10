@@ -15,8 +15,17 @@ set -euo pipefail
 #   - dev[n]        device passthrough        (LXC.pm:1710)
 #   - hookscript                              (LXC.pm:1761)
 #   - features flags other than `nesting`     (check_ct_modify_config_perm)
-# The node CLI (`pct set`) runs as root@pam, so it applies all of them.
-# Terraform still creates the CT + sets `nesting` (the one token-safe flag).
+#   - creating a PRIVILEGED CT at all         (needs Sys.Modify on /)
+# The node CLI (`pct create` / `pct set`) runs as root@pam, so it does all of
+# it. env/ubuntu is a PRIVILEGED CT (a real GNOME/GDM desktop needs
+# systemd-logind sessions + udev, which unprivileged Proxmox CTs don't give);
+# Terraform can't create it, so scripts/ct-recreate.sh does, then
+# `terraform import` reconciles state. This script then layers on:
+#   - features nesting/keyctl/fuse
+#   - lxc.apparmor.profile: unconfined   (GDM/mutter/logind/snapd trip the
+#     default + nesting profiles; single-user box, accepted)
+#   - the GPU / USB / input / sound / seat (fb + VTs) device lines
+#   - the gpu-arbiter hookscript
 #
 # EVERYTHING device-related goes in as raw `lxc.mount.entry ... bind,optional`
 # + `lxc.cgroup2.devices.allow`, NOT `pct set --devN`. `dev[n]` paths are
@@ -112,6 +121,10 @@ awk -v b="$BEGIN" -v e="$END" -v ob="$OLD_BEGIN" -v oe="$OLD_END" '
 if [ "$MODE" = add ] && [ "$WITH_USB" = 1 ]; then
   cat >>"$tmp" <<EOF
 $BEGIN
+# Privileged CT for a full GNOME desktop. The default (and nesting) AppArmor
+# profiles block enough of GDM / mutter / systemd-logind / snapd that the
+# session never comes up; unconfine it (single-user workstation, own box).
+lxc.apparmor.profile: unconfined
 # GPU: nvidia (195), drm (226), nvidia-caps (236). nvidia-uvm's major is
 # DYNAMIC (kernel allocates it high) — allow a range that covers it (seen
 # 509/511); if it lands outside 505-511 after a host reboot, widen this.
@@ -134,19 +147,25 @@ lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,creat
 lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir 0 0
-# USB (189) / input (13) / ALSA (116) / usb-ACM (166) / tty (4) / fb (29)
+# USB (189) / input (13) / ALSA (116) / usb-ACM (166) / tty (4) / fb (29) / uinput (10:223)
 lxc.cgroup2.devices.allow: c 189:* rwm
 lxc.cgroup2.devices.allow: c 13:* rwm
 lxc.cgroup2.devices.allow: c 116:* rwm
 lxc.cgroup2.devices.allow: c 166:* rwm
 lxc.cgroup2.devices.allow: c 4:* rwm
 lxc.cgroup2.devices.allow: c 29:* rwm
+lxc.cgroup2.devices.allow: c 10:223 rwm
 lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/fb0 dev/fb0 none bind,optional,create=file 0 0
-lxc.mount.entry: /dev/tty7 dev/tty7 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/vga_arbiter dev/vga_arbiter none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/uinput dev/uinput none bind,optional,create=file 0 0
+# VTs for GDM/Xorg. Xorg runs -keeptty -novtswitch; GDM's logind seat wants a
+# few. NEVER bind /dev/console or /dev/tty0 — LXC owns them (sync_wait: 34).
+lxc.mount.entry: /dev/tty1 dev/tty1 none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/tty2 dev/tty2 none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/tty7 dev/tty7 none bind,optional,create=file 0 0
 $END
 EOF
 fi

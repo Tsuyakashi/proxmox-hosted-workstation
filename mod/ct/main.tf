@@ -110,6 +110,17 @@ resource "proxmox_virtual_environment_container" "this" {
     #   must not destroy/recreate a live workstation.
     # started: the arbiter / workstation.sh own run state after the first create;
     #   Terraform must not stop or start the CT on later applies.
-    ignore_changes = [operating_system[0].template_file_id, started]
+    # features: on a privileged CT a token may not write ANY feature flag, and
+    #   keyctl/fuse are root@pam regardless — lxc-ct-passthrough.sh owns them.
+    # console: `pct create` stamps tty/cmode defaults the token can't manage.
+    # initialization[0].dns: searchdomain is set once at create; a perpetual
+    #   diff over it isn't worth it.
+    ignore_changes = [
+      operating_system[0].template_file_id,
+      started,
+      features,
+      console,
+      initialization[0].dns,
+    ]
   }
 }
