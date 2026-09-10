@@ -55,11 +55,16 @@ HOOK="local:snippets/gpu-arbiter.sh"
 CONF="/etc/pve/lxc/${CTID}.conf"
 [ -f "$CONF" ] || { echo "error: $CONF not found (is the CT created?)" >&2; exit 1; }
 
-BEGIN="# --- workstation seat: usb/input/snd + physical console (lxc-ct-passthrough.sh) ---"
-END="# --- end workstation seat ---"
-# older marker (pre-seat) — also stripped so upgrades are clean
-OLD_BEGIN="# --- workstation usb/input/snd passthrough (lxc-ct-passthrough.sh) ---"
-OLD_END="# --- end workstation usb/input/snd passthrough ---"
+# Markers must contain NO ':' — Proxmox url-encodes it to %3A when it rewrites
+# the conf, so a ':'-bearing marker won't match on the next run, the old block
+# isn't stripped, and a SECOND copy gets appended. Two identical lxc.mount.entry
+# / cgroup lines then fail the container at spawn (`sync_wait: 34`).
+BEGIN="# >>> workstation seat (lxc-ct-passthrough.sh) - gpu + usb/input/snd + physical console >>>"
+END="# <<< end workstation seat <<<"
+# Strip is prefix/regex based so it also catches earlier markers (incl. any
+# that Proxmox already mangled with %3A) — see the awk below.
+STRIP_BEGIN_RE='^# (>>> workstation seat|--- workstation (seat|usb/input))'
+STRIP_END_RE='^# (<<< end workstation seat|--- end workstation (seat|usb/input))'
 
 pct_running() { pct status "$CTID" 2>/dev/null | grep -q running; }
 if pct_running; then
@@ -109,15 +114,19 @@ fi
 # ------------------------------------------------------------
 # 4. Raw lxc.* — things dev[n] can't express:
 #    - USB / input / sound *directories* (bind + cgroup major ranges)
-#    - the physical seat: framebuffer + VTs so an Xorg inside the CT can
-#      become DRM-master and light the monitors. NOTE: never bind /dev/console
-#      or /dev/tty0 — LXC owns those and it fails the container with
-#      `sync_wait: 34`. tty1/tty2/tty7 + fb0 are enough (Xorg runs with
-#      -keeptty, so it never VT-switches).
+#    - the physical seat: framebuffer + tty7 so an Xorg inside the CT can
+#      become DRM-master and light the monitors. NEVER bind /dev/console,
+#      /dev/tty0, or the getty ttys (tty1/tty2) — LXC / Proxmox own those and
+#      binding them fails the container with `sync_wait: 34`. tty7 + fb0 +
+#      vga_arbiter are enough (Xorg runs -keeptty -novtswitch).
+#    A duplicated block (old marker not stripped) triggers the SAME
+#    `sync_wait: 34` — hence the ':'-free markers above.
 # ------------------------------------------------------------
 tmp=$(mktemp)
-awk -v b="$BEGIN" -v e="$END" -v ob="$OLD_BEGIN" -v oe="$OLD_END" '
-  $0==b || $0==ob {drop=1} drop==0{print} $0==e || $0==oe {drop=0}' "$CONF" >"$tmp"
+awk -v br="$STRIP_BEGIN_RE" -v er="$STRIP_END_RE" '
+  $0 ~ br {drop=1; next}
+  $0 ~ er {drop=0; next}
+  drop==0 {print}' "$CONF" >"$tmp"
 if [ "$MODE" = add ] && [ "$WITH_USB" = 1 ]; then
   cat >>"$tmp" <<EOF
 $BEGIN
@@ -161,10 +170,9 @@ lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/fb0 dev/fb0 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/vga_arbiter dev/vga_arbiter none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/uinput dev/uinput none bind,optional,create=file 0 0
-# VTs for GDM/Xorg. Xorg runs -keeptty -novtswitch; GDM's logind seat wants a
-# few. NEVER bind /dev/console or /dev/tty0 — LXC owns them (sync_wait: 34).
-lxc.mount.entry: /dev/tty1 dev/tty1 none bind,optional,create=file 0 0
-lxc.mount.entry: /dev/tty2 dev/tty2 none bind,optional,create=file 0 0
+# Only tty7 for the seat's Xorg (-keeptty -novtswitch). NEVER bind
+# /dev/console, /dev/tty0, or the getty ttys (tty1/tty2 — Proxmox's own
+# `tty: 2` consoles): binding those fails the container with `sync_wait: 34`.
 lxc.mount.entry: /dev/tty7 dev/tty7 none bind,optional,create=file 0 0
 $END
 EOF
