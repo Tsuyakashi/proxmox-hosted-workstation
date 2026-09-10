@@ -15,18 +15,25 @@
 #   GPU/USB on `pct start` and aborts the start if the Windows VM is running;
 #   scripts/workstation.sh is the CLI on top. See README "Переключение ОС".
 #
-# The .tar.zst template is a standard minimal Ubuntu rootfs (NOT a cloud
-# image); ubuntu-desktop + the NVIDIA userspace driver are installed on first
-# boot by scripts/lxc-ubuntu-desktop-provision.sh (run inside the CT).
+# PRIVILEGED container (var.unprivileged = false). A full Ubuntu GNOME / GDM
+# desktop needs systemd-logind to hand out a real graphical session + seat and
+# a working udev — an unprivileged Proxmox CT gives neither. See mod/ct's
+# `unprivileged` variable for the trade-off.
 #
-# DEVICE PASSTHROUGH + HOOKSCRIPT ARE NOT SET HERE. Proxmox hard-codes both
-# `dev[n]:` (device_passthrough) and `hookscript:` to root@pam only — no role
-# privilege grants them, so the API token this project uses gets HTTP 403.
-# Both are applied out of band as root on the node:
+# The .tar.zst template is a standard minimal Ubuntu rootfs (NOT a cloud
+# image); the full `ubuntu-desktop` stack + GDM + the NVIDIA userspace driver
+# are installed on first boot by scripts/lxc-ubuntu-desktop-provision.sh (run
+# inside the CT).
+#
+# FEATURES + DEVICE PASSTHROUGH + HOOKSCRIPT ARE NOT SET HERE. On a privileged
+# CT an API token may not send a `features {}` block at all, and Proxmox
+# hard-codes `dev[n]:` and `hookscript:` to root@pam regardless. All of it is
+# applied out of band as root on the node:
 #
 #   ssh bare-pve scripts/lxc-ct-passthrough.sh <ctid>
 #
-# which writes raw `lxc.*` GPU/DRI (+ USB/input/snd) lines and runs
+# which sets `--features nesting=1,keyctl=1,fuse=1`, writes raw `lxc.*` GPU/DRI
+# (+ USB/input/snd + apparmor) lines and runs
 # `pct set <ctid> --hookscript local:snippets/gpu-arbiter.sh`. Re-run after any
 # `terraform apply` that recreates the CT.
 
@@ -53,12 +60,15 @@ module "ubuntu_ct" {
   ssh_public_keys = var.ssh_public_keys
 
   # Lifecycle is external (gpu-arbiter.sh pre-start hook + workstation.sh CLI).
+  # Create it STOPPED — the node still needs lxc-ct-passthrough.sh (GPU/USB +
+  # hookscript + apparmor) before a first start makes sense.
   start_on_boot = false
+  started       = false
 
   tags = ["workstation", "gpu", "ubuntu"]
 
-  # Only features.nesting is set here (all Terraform can do with a token).
-  # keyctl + fuse + the GPU/USB dev lines + the hookscript are added on the
-  # node by scripts/lxc-ct-passthrough.sh — all four are hard-coded root@pam
-  # in pve-container (verified in src/PVE/LXC.pm), no role grants them.
+  # No features{} block reaches Proxmox for a privileged CT (see mod/ct).
+  # nesting + keyctl + fuse + the GPU/USB dev lines + the hookscript + the
+  # apparmor profile are all added on the node by
+  # scripts/lxc-ct-passthrough.sh.
 }

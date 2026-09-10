@@ -71,14 +71,18 @@ resource "proxmox_virtual_environment_container" "this" {
     }
   }
 
-  # Proxmox only lets a non-root@pam token touch `nesting` (and only on an
-  # unprivileged CT — see check_ct_modify_config_perm in pve-container). Every
-  # other feature flag — keyctl, fuse, mount — raises a 403 for the token
-  # ("changing feature flags (except nesting) is only allowed for root@pam").
-  # Those are applied on the node by scripts/lxc-ct-passthrough.sh, together
-  # with the dev[n] / hookscript bits that are also hard-coded root@pam only.
-  features {
-    nesting = var.nesting
+  # Proxmox only lets a non-root@pam token touch `nesting`, and ONLY on an
+  # unprivileged CT (check_ct_modify_config_perm in pve-container). On a
+  # privileged CT every feature flag — nesting included — is root@pam, so the
+  # token must not send the block at all (it 403s the whole create). Every
+  # other flag (keyctl, fuse, mount) is root@pam regardless. All of these,
+  # plus the dev[n] / hookscript bits, are applied on the node by
+  # scripts/lxc-ct-passthrough.sh.
+  dynamic "features" {
+    for_each = var.unprivileged ? [1] : []
+    content {
+      nesting = var.nesting
+    }
   }
 
   dynamic "startup" {
@@ -106,6 +110,23 @@ resource "proxmox_virtual_environment_container" "this" {
     #   must not destroy/recreate a live workstation.
     # started: the arbiter / workstation.sh own run state after the first create;
     #   Terraform must not stop or start the CT on later applies.
-    ignore_changes = [operating_system[0].template_file_id, started]
+    # features: on a privileged CT a token may not write ANY feature flag, and
+    #   keyctl/fuse are root@pam regardless — lxc-ct-passthrough.sh owns them.
+    # console: `pct create` stamps tty/cmode defaults the token can't manage.
+    # initialization[0].dns: searchdomain is set once at create; a perpetual
+    #   diff over it isn't worth it.
+    # hook_script_file_id / description: set on the node by
+    #   lxc-ct-passthrough.sh (the hookscript is root@pam; `description` is
+    #   just the `#` comment lines of the raw seat block, which the provider
+    #   surfaces as the CT description). Terraform must not strip either.
+    ignore_changes = [
+      operating_system[0].template_file_id,
+      started,
+      features,
+      console,
+      initialization[0].dns,
+      hook_script_file_id,
+      description,
+    ]
   }
 }

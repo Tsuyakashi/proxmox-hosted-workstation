@@ -32,9 +32,22 @@ variable "swap" {
 
 variable "unprivileged" {
   description = <<-EOT
-    Unprivileged container (root maps to an unprivileged host uid). Keep true —
-    GPU device nodes come in at mode 0666 (see scripts/lxc-ct-passthrough.sh),
-    enough for an unprivileged CT to open them.
+    Unprivileged container (root maps to an unprivileged host uid).
+
+    env/ubuntu runs this FALSE (privileged): a full GNOME / GDM desktop needs
+    systemd-logind to hand out a real graphical session + seat, and a working
+    udev, neither of which an unprivileged Proxmox CT provides (that's why the
+    earlier XFCE build had to hand-roll Xorg via xinit and fake up evdev /
+    PipeWire nodes). Privileged also lets systemd-udevd actually populate
+    /sys, so libinput and the ALSA/monitor auto-discovery just work.
+
+    Trade-off: container root maps to host root (shared kernel). Acceptable
+    here — it's a single-user workstation on the owner's own box, Windows is
+    an isolated VM, and the GPU/USB rebind is governed by gpu-arbiter.sh.
+
+    When false, mod/ct sends no `features {}` block (a token can't set any
+    flag on a privileged CT) — nesting/keyctl/fuse come from
+    scripts/lxc-ct-passthrough.sh on the node.
   EOT
   type        = bool
   default     = true

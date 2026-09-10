@@ -5,11 +5,13 @@ Terraform-конфигурация для развёртывания рабоч�
 
 - **`env/windows`** — полноценная VM с PCI-passthrough через `vfio-pci`
   (`mod/vm` + `proxmox_hardware_mapping_pci`).
-- **`env/ubuntu`** — LXC-контейнер, который **разделяет** драйвер ядра хоста и
-  получает GPU как набор device-нод (`/dev/nvidia*`, `/dev/dri/*`). Ни OVMF,
-  ни vfio, ни Code 43. `mod/ct` создаёт контейнер тем же API-токеном, а
-  root@pam-only части (`dev[n]`, `hookscript`, feature-флаги кроме `nesting`)
-  доводит `scripts/lxc-ct-passthrough.sh` на ноде — см.
+- **`env/ubuntu`** — **privileged** LXC-контейнер, который **разделяет** драйвер
+  ядра хоста и получает GPU как набор device-нод (`/dev/nvidia*`,
+  `/dev/dri/*`). Ни OVMF, ни vfio, ни Code 43. Полноценный GNOME 50 / Wayland
+  на физических мониторах. Privileged CT токену создать нельзя (нужен
+  `Sys.Modify` на `/`), поэтому его делает `scripts/ct-recreate.sh` на ноде +
+  `terraform import`; root@pam-only части (`dev[n]`, `hookscript`, `features`,
+  `apparmor`, `sys:rw`) доводит `scripts/lxc-ct-passthrough.sh` — см.
   [root@pam-ограничения LXC](#rootpam-ограничения-lxc).
 
 Оба варианта нацелены на одно железо и **взаимоисключающи** — см.
@@ -83,12 +85,15 @@ Board: ASRock H81M-VG4 R2.0, UEFI P1.50
   `scripts/lxc-ct-passthrough.sh` (root@pam-only), а не токен-terraform.
 - **`env/<name>`** — конкретные окружения:
   - `env/windows` — Windows-рабочка (VM, `mod/vm`).
-  - `env/ubuntu` — Ubuntu 26.04 **desktop LXC** (`mod/ct`), рабочий стол
-    физически на мониторах. LXC (общее ядро хоста), а не VM, потому что
-    **анти-читы банят гипервизоры** (по CPUID); LXC для них — не VM.
-    Шаблон — обычный minimal-rootfs (не cloud-образ);
-    `scripts/lxc-ubuntu-desktop-provision.sh` доставляет **XFCE** + userspace
-    NVIDIA + Steam/Discord/Chrome/VS Code.
+  - `env/ubuntu` — Ubuntu 26.04 **desktop LXC** (`mod/ct`), полноценный
+    GNOME 50 / Wayland на физических мониторах. LXC (общее ядро хоста), а не
+    VM, потому что **анти-читы банят гипервизоры** (по CPUID); LXC для них —
+    не VM. **Privileged** контейнер (`unprivileged = false`): GNOME/GDM
+    нужна настоящая графическая logind-сессия + рабочий udev, чего
+    непривилегированный CT не даёт. Шаблон — обычный minimal-rootfs (не
+    cloud-образ); `scripts/lxc-ubuntu-desktop-provision.sh` доставляет
+    `ubuntu-desktop` + userspace NVIDIA + GDM-автологин +
+    Steam/Discord/Chrome/VS Code.
 
 Каждое окружение хранит своё состояние отдельно (S3 backend, ключ
 `<env>/terraform.tfstate`).
@@ -104,6 +109,7 @@ Board: ASRock H81M-VG4 R2.0, UEFI P1.50
 | HDMI-audio `01:00.1` | `vfio-pci` | `snd_hda_intel` (звук в CT через `/dev/snd`) |
 | USB-контроллеры | `vfio-pci` (целые PCI-функции) | `xhci_pci`/`ehci-pci` + `/dev/bus/usb` в CT |
 | Первичная подготовка хоста | `scripts/iommu-vfio-setup.sh` | `scripts/lxc-nvidia-host-setup.sh` |
+| Тип гостя | VM (OVMF) | **privileged** LXC |
 | RAM | 12 ГБ | 12 ГБ |
 
 **Обе гостевые ОС по умолчанию выключены** (`on_boot=false` /
@@ -115,12 +121,15 @@ GPU + USB под нужный режим и стартует гостя. Ост�
 другую.
 
 > **Картинку контейнер отдаёт прямо на физические мониторы.** Хост headless
-> (Proxmox сам X не поднимает), поэтому Xorg внутри CT открывает
-> `/dev/dri/card0` и сам становится DRM-master. Ни display manager, ни VT:
-> systemd-сервис запускает `xinit … X :0 vt7 -keeptty -novtswitch` от
-> пользователя. DE — **XFCE** (GNOME требует logind-сессию, которую
-> unprivileged LXC не создаёт; Plasma 6.6 на 26.04 — только Wayland). Ввод —
-> **evdev** (libinput не работает без udev). См.
+> (Proxmox сам X не поднимает), DRM-master свободен. CT — **privileged** +
+> `lxc.mount.auto: proc:rw sys:rw` + `apparmor: unconfined`
+> (`scripts/lxc-ct-passthrough.sh`): этого хватает, чтобы `systemd-udevd`
+> сделал coldplug, а `systemd-logind` отдал `seat0` c `[MASTER] drm:card0`.
+> Дальше как на железе: **GDM** автологинит юзера в сессию **GNOME 50 /
+> Wayland** (mutter → nvidia-drm GBM atomic KMS). libinput, WirePlumber,
+> RDP (`gnome-remote-desktop`) — всё работает нативно через udev, без
+> костылей. Ubuntu 26.04 = GNOME 50, X11-сессии для gnome-shell больше
+> нет (Wayland-only с GNOME 49). См.
 > [Известные ограничения → LXC](#lxc-envubuntu).
 
 ### Провайдеры
@@ -161,7 +170,8 @@ proxmox-hosted-workstation/
 │   ├── iommu-vfio-setup.sh              # хост -> vfio-pci (первичная подготовка, env/windows)
 │   ├── lxc-nvidia-host-setup.sh         # хост -> драйвер nvidia 580 (первичная подготовка, env/ubuntu)
 │   ├── lxc-ct-passthrough.sh            # на ноде: root@pam-биты CT (dev[n] GPU / features / hookscript / USB)
-│   ├── lxc-ubuntu-desktop-provision.sh  # внутри CT: XFCE + userspace NVIDIA + manual-Xorg сессия + Steam/Discord/Chrome/VS Code
+│   ├── ct-recreate.sh                  # на ноде: pct create --unprivileged 0 (токену нельзя) + подсказка terraform import
+│   ├── lxc-ubuntu-desktop-provision.sh  # внутри CT: ubuntu-desktop (GNOME 50) + userspace NVIDIA + GDM-автологин + RDP + Steam/Discord/Chrome/VS Code
 │   ├── gpu-arbiter.sh                   # Proxmox pre-start хук: своп GPU/USB + lock (движок)
 │   ├── workstation.sh                   # CLI поверх арбитра: status / start --force / --via-reboot
 │   ├── workstation-resume.service       # systemd: до-старт после reboot (--via-reboot)
@@ -320,7 +330,9 @@ return 1 if $authuser eq 'root@pam';
 | `dev[n]:` (device passthrough) | только `root@pam` |
 | `hookscript:` | только `root@pam` |
 | `features:` — всё кроме `nesting` (`keyctl`, `fuse`, `mount`) | только `root@pam` |
-| `features: nesting=1` (на **unprivileged** CT) | токен + `VM.Allocate` ✓ |
+| `features: nesting=1` (только на **unprivileged** CT) | токен + `VM.Allocate` ✓ |
+| создать **privileged** CT (`unprivileged=0`) | нужен `Sys.Modify` на `/` — токену нет → `ct-recreate.sh` на ноде |
+| любой `features`-флаг на **privileged** CT | root@pam (`lxc-ct-passthrough.sh`) |
 | rootfs, net, memory, cores, tags, … | токен ✓ |
 
 Варианты обхода у сообщества: (а) токен `root@pam!...` с `privsep=0` — тогда
@@ -537,7 +549,7 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `cores`             | number       | `4`                                                    | Ядра CPU                                        |
 | `memory`            | number       | `12288`                                                 | RAM, МиБ (как у `env/windows` — вместе не запускаются) |
 | `swap`              | number       | `0`                                                    | Swap, МиБ                                       |
-| `unprivileged`      | bool         | `true`                                                  | Unprivileged CT (GPU-ноды приходят с `mode=0666`) |
+| `unprivileged`      | bool         | `false`                                                 | **Privileged** — GNOME/GDM нужна graphical logind-сессия + udev |
 | `template_file_id`  | string       | `local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst` | LXC-шаблон (minimal rootfs, **не** cloud); `pveam download local <...>` |
 | `disk_size`         | number       | `40`                                                   | rootfs, ГиБ                                     |
 | `mac`               | string       | `BC:24:11:AB:CD:01`                                     | MAC (отличается от windows)                     |
@@ -558,7 +570,7 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `node_name`           | string       | —            | Нода Proxmox                                                    |
 | `vm_id`               | number       | `null`       | Явный CTID (`null` — следующий свободный)                       |
 | `cores` / `memory` / `swap` | number | `2` / `2048` / `0` | Ресурсы                                                  |
-| `unprivileged`        | bool         | `true`       | Unprivileged CT                                                 |
+| `unprivileged`        | bool         | `false`      | Privileged CT (для GNOME); токену нельзя создать → `ct-recreate.sh` + `terraform import` |
 | `template_file_id`    | string       | —            | Volume id LXC-шаблона                                           |
 | `os_type`             | string       | `ubuntu`     | Дистрибутив для CT-тулинга Proxmox                              |
 | `datastore_id_rootfs` | string       | `local-lvm`  | Datastore под rootfs                                            |
@@ -566,7 +578,7 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `network_bridge` / `mac` | string    | `vmbr0` / `null` | Сеть                                                       |
 | `ipv4_address` / `ipv4_gateway` | string | `dhcp` / `null` | IPv4                                                    |
 | `nameservers` / `search_domain` | list(string) / string | `null` | DNS (`null` — наследовать от ноды)               |
-| `nesting`             | bool         | `true`       | `features.nesting` — **единственный** feature-флаг, доступный токену (на unprivileged CT). keyctl/fuse/mount — root@pam, через `lxc-ct-passthrough.sh` |
+| `nesting`             | bool         | `true`       | `features.nesting`. Токен может ставить его только на **unprivileged** CT; на privileged весь блок `features{}` уходит в `lxc-ct-passthrough.sh` (root@pam). `mod/ct` шлёт блок лишь при `unprivileged=true` |
 | `started`             | bool         | `true`       | Запустить ли CT после create. В `ignore_changes` — только на первый `apply`, дальше run-state у арбитра |
 | `start_on_boot`       | bool         | `true`       | Автостарт на буте ноды                                          |
 | `startup_order`       | number       | `null`       | Слот в порядке загрузки                                         |
@@ -654,36 +666,48 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
   карту — `lxc-nvidia-host-setup.sh` его блэклистит вместе с `nouveau`.
 - **`nvidia-persistenced`** этот `.run` не ставит юнитом — ноды создают udev +
   `modules-load.d` + `nvidia-modprobe` из `lxc-nvidia-host-setup.sh`.
-- **Физический монитор из контейнера — работает.** Хост headless → DRM-master
-  свободен, Xorg в CT его берёт. Ключевое:
+- **Полноценный GNOME 50 / Wayland из контейнера — работает.** Ключевое —
+  сделать CT **privileged** и дать ему рабочий udev/logind:
   - `lxc-nvidia-host-setup.sh`: `nvidia-drm modeset=1 fbdev=1` → `/dev/fb0` +
-    DRM-коннекторы.
-  - `lxc-ct-passthrough.sh` seat-блок: `/dev/fb0`, `/dev/tty7` (host-tty, ноду
-    хост не использует), `/dev/vga_arbiter`, cgroup `c 4/29/226`. **НЕ**
-    `/dev/console` и `/dev/tty0` (LXC ими владеет → `sync_wait: 34`), **НЕ**
-    bind `/dev/dri` каталогом (autodev-mknod `card0` → «File exists», hook
-    status 17).
-  - Ни display manager, ни VT: `workstation-session.service` (`User=`,
-    `TTYPath=/dev/tty7`) → `xinit … X :0 vt7 -keeptty -nolisten tcp
-    -novtswitch`. `Xwrapper.config` → `needs_root_rights=yes`.
-    `loginctl enable-linger <user>` для `systemd --user`.
-  - **XFCE**, не GNOME/Plasma: GNOME требует logind-сессию (в unprivileged CT
-    `CreateSession` падает), Plasma 6.6 на 26.04 — Wayland-only.
-  - Ввод — **evdev**, не libinput (тот не стартует без udev, которого в CT
-    нет). `gen-xorg-input` строит явные `InputDevice` из
-    `/proc/bus/input/devices` перед каждым стартом X.
-  - Звук — та же история: ALSA-монитор WirePlumber ходит через udev, поэтому
-    `wpctl status` пустой (только Dummy Output), хотя `aplay -l` видит все
-    карты. `gen-pw-alsa` строит явные PipeWire-ноды (`adapter` /
-    `api.alsa.pcm.sink`+`.source`, `hw:<имя-карты>`) в
-    `~/.config/pipewire/pipewire.conf.d/99-lxc-alsa.conf` (HDMI-звук GPU
-    пропускается). Перевтыкнул другую карту — `sudo gen-pw-alsa` + рестарт
-    сессии.
-  - Раскладку мониторов (лево/право, Гц) один раз в XFCE «Дисплей» — сохраняется.
+    DRM-коннекторы; userspace-часть nvidia (`--no-kernel-module`) ставит
+    provision внутри CT, версия обязана совпадать с модулем на хосте.
+  - `lxc-ct-passthrough.sh` seat-блок:
+    - `unprivileged = 0` (создаёт `scripts/ct-recreate.sh` — токену нельзя,
+      нужен `Sys.Modify` на `/`; потом `terraform import`).
+    - `lxc.apparmor.profile: unconfined` — дефолтный + nesting профили режут
+      GDM/mutter/logind/snapd.
+    - **`lxc.mount.auto: proc:rw sys:rw`** — без записи в `/sys`
+      `systemd-udevd` не может coldplug (`udevadm trigger` пишет
+      `.../uevent`), udev-БД пустая → libinput ничего не видит, а у `seat0`
+      нет DRM. С ней `loginctl seat-status seat0` показывает `[MASTER]
+      drm:card0` и Wayland-композитор берёт master.
+    - GPU/USB/input/snd + `/dev/fb0`, `/dev/tty7`, `/dev/vga_arbiter`,
+      `/dev/uinput` сырыми `lxc.mount.entry`. **НЕ** `/dev/console`,
+      `/dev/tty0`, getty-ttys `tty1`/`tty2` (Proxmox `tty: 2`) — фейл
+      контейнера `sync_wait: 34`. Маркеры seat-блока без `:` (Proxmox
+      кодирует его в `%3A` → дубль блока → тот же `sync_wait: 34`).
+  - `provision`: `systemctl mask apparmor/tpm-udev/console-getty/rfkill`
+    (контейнерный шум → `is-system-running` = `running`), coldplug-юнит
+    `workstation-coldplug.service`, udev-правило `card0 master-of-seat`.
+  - **GDM** (`WaylandEnable=true`, `AutomaticLogin`), `61-gdm.rules → /dev/null`
+    (иначе GDM гасит Wayland при nvidia). Сессия — `ubuntu.desktop`
+    (Wayland). X11-сессии для gnome-shell в GNOME 49+ нет вообще.
+  - Ввод (libinput), звук (WirePlumber), монитор-хотплаг — **нативно через
+    udev**, никаких `gen-xorg-input` / `gen-pw-alsa`.
+  - GNOME-дефолты — системная dconf-БД (`/etc/dconf/db/local.d`), а не
+    `gsettings` (той нужна живая сессия). Раскладка мониторов — `monitors.xml`
+    (по EDID vendor/product/serial; при несовпадении GNOME его игнорит —
+    поправить один раз в Settings → Displays, сохранится).
+  - Автологин не разблокирует login keyring → провижн кладёт **нешифрованный**
+    `Default_keyring` (иначе libsecret/Chrome/grdctl висят).
+  - **Удалённый доступ**: `gnome-remote-desktop` RDP на `:3389` (NVENC).
+    TLS-серт генерит провижн, а `grdctl enable` + креды ставит
+    per-login-юнит `workstation-rdp.service` (нужна живая шина сессии).
+    Клиент: `xfreerdp3 /v:<ct-ip> /u:tsu /p:<pw> /cert:ignore`.
 - **USB-контроллер целиком в LXC — нельзя** (PCI, только VM). Эквивалент:
   bind-mount `/dev/bus/usb` + `/dev/input` + `/dev/snd` + cgroup major
-  189/13/116/166 → все устройства, hotplug. + host-udev `MODE="0666"` (иначе
-  unprivileged CT видит ноды как `nobody:nogroup`).
+  189/13/116/166 → все устройства, hotplug. В privileged CT ноды приходят
+  `root:root` (не `nobody:nogroup`), + udev-правило `MODE=0666`.
 - **Смена VM → LXC пересоздаёт ресурс** (разные типы, `moved` невозможен). У
   `env/ubuntu` стейт был пустой (VM-версию не применяли), так что 1 to add.
 
@@ -730,18 +754,19 @@ ssh bare-pve 'bash /root/lxc-ct-passthrough.sh <ctid>'
 # 5. Рестарт -> pre-start хук проверит режим и стартанёт
 ssh bare-pve 'pct stop <ctid>; pct start <ctid>'   # или: workstation.sh start ubuntu
 
-# 6. Провижн десктопа внутри CT (~20-30 мин): XFCE + userspace NVIDIA +
-#    manual-Xorg сессия + Steam/Discord/Chrome/VS Code
+# 6. Провижн десктопа внутри CT (~40-60 мин): ubuntu-desktop (GNOME 50) +
+#    userspace NVIDIA + GDM-автологин + RDP + Steam/Discord/Chrome/VS Code
 ssh bare-pve 'pct push <ctid> /root/lxc-ubuntu-desktop-provision.sh /root/provision.sh
               pct exec <ctid> -- env NVIDIA_VERSION=580.178.04 SEAT_USER=<you> bash /root/provision.sh'
 
-# 7. Рестарт CT -> мониторы загораются с XFCE
+# 7. Рестарт CT -> GDM автологинит в GNOME 50 / Wayland на мониторах
 ssh bare-pve 'workstation.sh start ubuntu'
 ssh bare-pve 'pct exec <ctid> -- nvidia-smi'
 ```
 
 Мониторы загораются сразу после старта CT (`workstation-session.service`).
-Первый раз — разложить экраны/Гц в XFCE «Дисплей» (сохраняется). Пароль
+Первый раз — при необходимости поправить экраны/Гц в Settings → Displays
+(сохраняется). Пароль
 пользователя по умолчанию — `workstation`, поменять.
 
 ## Code 43
