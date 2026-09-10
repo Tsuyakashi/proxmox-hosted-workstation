@@ -106,7 +106,8 @@ systemctl mask snapd.service snapd.socket snapd.seeded.service \
 
 log "apt update + full-upgrade + base tools"
 apt-get update
-apt-get install -y curl wget ca-certificates gnupg software-properties-common
+apt-get install -y curl wget ca-certificates gnupg software-properties-common \
+  openssl libinput-tools wayland-utils mesa-utils vulkan-tools libsecret-tools
 apt-get -y full-upgrade
 
 log "ubuntu-desktop (full GNOME + GDM) — big download; snap parts are no-ops"
@@ -172,13 +173,24 @@ ln -sf /dev/null /etc/udev/rules.d/61-gdm.rules
 echo 'options nvidia-drm modeset=1 fbdev=1' >/etc/modprobe.d/nvidia-drm.conf
 
 systemctl set-default graphical.target
-systemctl enable gdm3 2>/dev/null || systemctl enable gdm 2>/dev/null || true
+systemctl enable gdm 2>/dev/null || true
+# display-manager.service -> gdm3.service symlink is what actually starts GDM
+# at graphical.target; make sure it exists.
+[ -e /etc/systemd/system/display-manager.service ] || \
+  ln -sf /usr/lib/systemd/system/gdm3.service /etc/systemd/system/display-manager.service
+
+# container noise: these units always fail in an LXC and only serve to make
+# `systemctl is-system-running` report "degraded".
+systemctl mask apparmor.service tpm-udev.path tpm-udev.service \
+  console-getty.service systemd-rfkill.socket systemd-rfkill.service 2>/dev/null || true
 
 # ------------------------------------------------------------
 # 4. coldplug udev at boot (bind-mounted nodes fire no uevents)
 # ------------------------------------------------------------
-# systemd-udev-trigger runs early; make sure it re-runs after our device
-# binds are in place and mark card0 master-of-seat for logind.
+# The GPU/USB/input nodes are bind-mounted in by LXC and fire no uevents
+# inside the CT, so systemd-udevd's DB starts empty -> libinput sees nothing
+# and logind's seat0 has no DRM. A coldplug re-trigger (writable /sys, from
+# lxc-ct-passthrough.sh) fixes both. Also mark card0 master-of-seat.
 cat >/etc/udev/rules.d/99-workstation-seat.rules <<'EOF'
 SUBSYSTEM=="drm", KERNEL=="card0", TAG+="seat", TAG+="master-of-seat"
 SUBSYSTEM=="usb", MODE="0666"
@@ -202,47 +214,130 @@ EOF
 systemctl enable workstation-coldplug.service
 
 # ------------------------------------------------------------
-# 5. GNOME defaults: Ubuntu look, dual-monitor layout, no idle/lock
+# 5. GNOME defaults (system dconf) + monitor layout + keyring
 # ------------------------------------------------------------
 install -d -o "$SEAT_USER" -g "$SEAT_USER" "${SEAT_HOME}/.config"
-# the user is created here, not by gnome-initial-setup — skip its first-login wizard
+# user is pre-created here, not by gnome-initial-setup — skip its wizard
 sudo -u "$SEAT_USER" touch "${SEAT_HOME}/.config/gnome-initial-setup-done"
 apt-get purge -y gnome-initial-setup 2>/dev/null || true
-# Monitor layout: AOC 144Hz on HDMI (left, primary), Philips 60Hz on DVI-I
-# (right). Adjust in Settings -> Displays if the physical sides differ; GNOME
-# persists it back here.
-cat >"${SEAT_HOME}/.config/monitors.xml" <<'EOF'
+
+# System-wide GNOME defaults via dconf (no live session needed, unlike gsettings)
+install -d /etc/dconf/profile /etc/dconf/db/local.d
+cat >/etc/dconf/profile/user <<'EOF'
+user-db:user
+system-db:local
+EOF
+cat >/etc/dconf/db/local.d/00-workstation <<'EOF'
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+
+[org/gnome/desktop/interface]
+color-scheme='prefer-dark'
+
+[org/gnome/desktop/input-sources]
+sources=[('xkb', 'us'), ('xkb', 'ru')]
+xkb-options=['grp:alt_shift_toggle']
+
+[org/gnome/mutter]
+experimental-features=[]
+EOF
+dconf update
+
+# Monitor layout: AOC 144Hz on HDMI-1 (left, primary), Philips 60Hz on
+# DVI-I-1 (right). GNOME matches on connector+vendor+product+serial; the
+# product/serial below are THIS rig's EDID. If they differ, GNOME ignores
+# this file and falls back to its own default — just fix it once in
+# Settings -> Displays, which persists back here.
+write_monitors() {
+  cat > "$1" <<'EOF'
 <monitors version="2">
   <configuration>
     <logicalmonitor>
       <x>0</x><y>0</y><scale>1</scale><primary>yes</primary>
       <monitor><monitorspec>
-        <connector>HDMI-1</connector><vendor>AOC</vendor><product>0x0</product><serial>0x0</serial>
-      </monitorspec><mode><width>1920</width><height>1080</height><rate>143.981</rate></mode></monitor>
+        <connector>HDMI-1</connector><vendor>AOC</vendor><product>2590G4</product><serial>0x00015024</serial>
+      </monitorspec><mode><width>1920</width><height>1080</height><rate>144.00076293945312</rate></mode></monitor>
     </logicalmonitor>
     <logicalmonitor>
       <x>1920</x><y>0</y><scale>1</scale>
       <monitor><monitorspec>
-        <connector>DVI-I-1</connector><vendor>PHL</vendor><product>0x0</product><serial>0x0</serial>
+        <connector>DVI-I-1</connector><vendor>PHL</vendor><product>PHL 246E9Q</product><serial>UK02043000888</serial>
       </monitorspec><mode><width>1920</width><height>1080</height><rate>60.000</rate></mode></monitor>
     </logicalmonitor>
   </configuration>
 </monitors>
 EOF
+}
+write_monitors "${SEAT_HOME}/.config/monitors.xml"
 chown "$SEAT_USER:$SEAT_USER" "${SEAT_HOME}/.config/monitors.xml"
-# GDM greeter gets the same layout (runs as Debian-gdm)
-install -d -o Debian-gdm -g Debian-gdm /var/lib/gdm3/.config 2>/dev/null || true
-cp "${SEAT_HOME}/.config/monitors.xml" /var/lib/gdm3/.config/monitors.xml 2>/dev/null || true
-chown -R Debian-gdm:Debian-gdm /var/lib/gdm3/.config 2>/dev/null || true
+install -d -o gdm -g gdm /var/lib/gdm3/.config 2>/dev/null || true
+write_monitors /var/lib/gdm3/.config/monitors.xml 2>/dev/null || true
+chown -R gdm:gdm /var/lib/gdm3/.config 2>/dev/null || true
 
-sudo -u "$SEAT_USER" dbus-run-session -- bash -c '
-  gsettings set org.gnome.desktop.session idle-delay 0
-  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type nothing
-  gsettings set org.gnome.desktop.screensaver lock-enabled false
-  gsettings set org.gnome.desktop.interface color-scheme prefer-dark
-  gsettings set org.gnome.desktop.input-sources sources "[('"'"'xkb'"'"', '"'"'us'"'"'), ('"'"'xkb'"'"', '"'"'ru'"'"')]"
-  gsettings set org.gnome.desktop.input-sources xkb-options "['"'"'grp:alt_shift_toggle'"'"']"
-' 2>/dev/null || log "gsettings pre-seed skipped (runs on first login anyway)"
+# Autologin can't unlock the login keyring (no password prompt). Pre-create
+# an UNENCRYPTED default keyring so libsecret apps (Chrome, grdctl) don't nag
+# and can actually store secrets.
+install -d -o "$SEAT_USER" -g "$SEAT_USER" -m 700 "${SEAT_HOME}/.local/share/keyrings"
+cat >"${SEAT_HOME}/.local/share/keyrings/Default_keyring.keyring" <<'EOF'
+[keyring]
+display-name=Default keyring
+lock-on-idle=false
+lock-after=false
+EOF
+printf 'Default_keyring' >"${SEAT_HOME}/.local/share/keyrings/default"
+chown -R "$SEAT_USER:$SEAT_USER" "${SEAT_HOME}/.local/share/keyrings"
+
+# ------------------------------------------------------------
+# 5b. gnome-remote-desktop: RDP into the live session (morning/away access)
+# ------------------------------------------------------------
+apt-get install -y gnome-remote-desktop 2>/dev/null || true
+GRD_DIR="${SEAT_HOME}/.config/gnome-remote-desktop"
+install -d -o "$SEAT_USER" -g "$SEAT_USER" -m 700 "$GRD_DIR"
+if [ ! -s "${GRD_DIR}/rdp-tls.key" ]; then
+  openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+    -keyout "${GRD_DIR}/rdp-tls.key" -out "${GRD_DIR}/rdp-tls.crt" \
+    -subj "/CN=${SEAT_USER}-workstation" >/dev/null 2>&1
+fi
+chown "$SEAT_USER:$SEAT_USER" "${GRD_DIR}"/rdp-tls.*
+chmod 600 "${GRD_DIR}/rdp-tls.key"; chmod 644 "${GRD_DIR}/rdp-tls.crt"
+systemctl --global disable gnome-remote-desktop.service 2>/dev/null || true
+systemctl disable gnome-remote-desktop.service 2>/dev/null || true  # system unit off; we share the live session
+# The actual `grdctl rdp enable` + credentials need a live user D-Bus session,
+# so they run from the per-login user unit below.
+install -d "${SEAT_HOME}/.config/systemd/user"
+cat >"${SEAT_HOME}/.config/systemd/user/workstation-rdp.service" <<EOF
+[Unit]
+Description=Enable gnome-remote-desktop RDP for this session
+After=graphical-session.target gnome-remote-desktop.service
+PartOf=graphical-session.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/grdctl rdp set-tls-cert %h/.config/gnome-remote-desktop/rdp-tls.crt
+ExecStart=/usr/bin/grdctl rdp set-tls-key %h/.config/gnome-remote-desktop/rdp-tls.key
+ExecStart=/usr/bin/grdctl rdp set-credentials ${SEAT_USER} ${SEAT_PASSWORD}
+ExecStart=/usr/bin/grdctl rdp disable-view-only
+ExecStart=/usr/bin/grdctl rdp enable
+ExecStart=/usr/bin/systemctl --user restart gnome-remote-desktop.service
+RemainAfterExit=yes
+[Install]
+WantedBy=graphical-session.target
+EOF
+chown -R "$SEAT_USER:$SEAT_USER" "${SEAT_HOME}/.config/systemd"
+sudo -u "$SEAT_USER" XDG_RUNTIME_DIR="/run/user/${SEAT_UID}" \
+  systemctl --user enable workstation-rdp.service 2>/dev/null || \
+  ln -sf ../workstation-rdp.service \
+    "${SEAT_HOME}/.config/systemd/user/graphical-session.target.wants/workstation-rdp.service" 2>/dev/null || \
+  { install -d "${SEAT_HOME}/.config/systemd/user/graphical-session.target.wants"; \
+    ln -sf ../workstation-rdp.service \
+    "${SEAT_HOME}/.config/systemd/user/graphical-session.target.wants/workstation-rdp.service"; }
+chown -R "$SEAT_USER:$SEAT_USER" "${SEAT_HOME}/.config/systemd"
 
 # ------------------------------------------------------------
 # 6. Steam / Discord / Chrome / VS Code  (each non-fatal)
@@ -286,11 +381,14 @@ echo ""
 echo "=== checks ==="
 ls -l /dev/dri/card0 /dev/nvidia0 /dev/fb0 2>&1 || echo "!! seat nodes missing — re-run lxc-ct-passthrough.sh, restart CT"
 nvidia-smi -L 2>&1 || echo "!! nvidia-smi failed (host/CT driver mismatch?)"
-loginctl seat-status seat0 2>&1 | grep -q 'drm:card0' && echo "seat0 has drm:card0 (Wayland can take master)" || echo "!! seat0 has no DRM — check lxc.mount.auto sys:rw + workstation-coldplug"
-echo "gnome-shell: $(dpkg -query -W -f='${Version}' gnome-shell 2>/dev/null || echo MISSING)"
-echo "gdm autologin: $(grep -c AutomaticLogin=${SEAT_USER} /etc/gdm3/custom.conf)"
+findmnt -no OPTIONS /sys | grep -q '^rw' && echo "/sys is rw (udev ok)" || echo "!! /sys is ro — add lxc.mount.auto sys:rw (lxc-ct-passthrough.sh)"
+loginctl seat-status seat0 2>&1 | grep -q 'drm:card0' && echo "seat0 has drm:card0 (Wayland can take master)" || echo "!! seat0 has no DRM — check /sys rw + workstation-coldplug"
+echo "gnome-shell: $(dpkg-query -W -f='${Version}' gnome-shell 2>/dev/null || echo MISSING)"
+echo "gdm autologin: $(grep -c "AutomaticLogin=${SEAT_USER}" /etc/gdm3/custom.conf)"
+echo "wayland session: $(ls /usr/share/wayland-sessions/ 2>/dev/null | tr '\n' ' ')"
 echo "installed apps: $(dpkg -l steam-installer discord google-chrome-stable code 2>/dev/null | grep -c '^ii') / 4"
 echo ""
 echo "Reboot the CT:  pct reboot <ctid>   (or  workstation.sh start ubuntu  from stopped)"
-echo "GDM autologs '${SEAT_USER}' into a GNOME/Wayland session on the monitors."
-echo "journalctl -b -u gdm ; journalctl -b _COMM=gnome-shell ; ~${SEAT_USER}/.local/share/xorg is X11-only (unused)"
+echo "GDM autologs '${SEAT_USER}' into a GNOME 50 / Wayland session on the monitors."
+echo "Remote:  xfreerdp3 /v:<ct-ip> /u:${SEAT_USER} /p:<pw> /cert:ignore   (g-r-d RDP :3389, NVENC)"
+echo "Logs:    journalctl -b -u gdm ; journalctl -b _COMM=gnome-shell"
