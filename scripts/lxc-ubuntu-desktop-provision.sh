@@ -77,12 +77,40 @@ EOF
 # unconfined anyway) — mask it so systemd isn't "degraded".
 systemctl mask apparmor.service 2>/dev/null || true
 
+# snapd cannot seed in a container (no loop mounts / squashfs / apparmor for
+# snap-confine): `snap wait system seed.loaded` hangs forever and deadlocks
+# the dpkg configure of snapd — and then every snap-transitional .deb
+# (firefox, thunderbird, snap-store, firmware-updater...) hangs its
+# maintainer script on `snap install`. Stub `snap` to succeed instantly and
+# mask the units BEFORE pulling ubuntu-desktop. GNOME itself is all .deb; the
+# only loss is the handful of default snaps (the user runs Chrome anyway).
+if [ ! -e /usr/bin/snap.real ] && [ -e /usr/bin/snap ]; then
+  dpkg-divert --local --rename --divert /usr/bin/snap.real --add /usr/bin/snap
+fi
+cat >/usr/bin/snap <<'EOF'
+#!/bin/bash
+# stub — this container can't run snaps. Succeed so transitional .deb
+# maintainer scripts neither hang nor fail. Real binary: /usr/bin/snap.real
+case "${1:-}" in
+  list) echo "No snaps are installed yet."; exit 0 ;;
+  info|find) echo "name: ${2:-unknown}"; exit 0 ;;
+  version) echo "snap    stub"; exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x /usr/bin/snap
+systemctl mask snapd.service snapd.socket snapd.seeded.service \
+  snapd.apparmor.service snapd.autoimport.service snapd.core-fixup.service \
+  snapd.recovery-chooser-trigger.service snapd.snap-repair.timer \
+  snapd.system-shutdown.service 2>/dev/null || true
+
 log "apt update + full-upgrade"
 apt-get update
 apt-get -y full-upgrade
 
-log "ubuntu-desktop (full GNOME + GDM) — this is a big download"
+log "ubuntu-desktop (full GNOME + GDM) — big download; snap parts are no-ops"
 apt-get install -y ubuntu-desktop
+apt-mark hold firefox thunderbird 2>/dev/null || true
 
 sed -i 's/^# *\(en_US.UTF-8\)/\1/; s/^# *\(ru_RU.UTF-8\)/\1/' /etc/locale.gen
 locale-gen >/dev/null 2>&1 || true
