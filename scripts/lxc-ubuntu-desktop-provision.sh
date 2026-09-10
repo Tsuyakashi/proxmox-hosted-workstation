@@ -205,6 +205,9 @@ systemctl enable workstation-coldplug.service
 # 5. GNOME defaults: Ubuntu look, dual-monitor layout, no idle/lock
 # ------------------------------------------------------------
 install -d -o "$SEAT_USER" -g "$SEAT_USER" "${SEAT_HOME}/.config"
+# the user is created here, not by gnome-initial-setup — skip its first-login wizard
+sudo -u "$SEAT_USER" touch "${SEAT_HOME}/.config/gnome-initial-setup-done"
+apt-get purge -y gnome-initial-setup 2>/dev/null || true
 # Monitor layout: AOC 144Hz on HDMI (left, primary), Philips 60Hz on DVI-I
 # (right). Adjust in Settings -> Displays if the physical sides differ; GNOME
 # persists it back here.
