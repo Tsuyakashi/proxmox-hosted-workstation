@@ -149,32 +149,33 @@ switch_to_ubuntu() {
   [ "$(cur_driver "$GPU_VGA")" = nvidia ] || { log "  GPU did not bind nvidia"; return 1; }
 
   # Nodes must exist before lxc binds them (the hook runs in the host ns, first).
-  # nvidia-modprobe is what *creates* /dev/nvidia0 + /dev/nvidiactl; on a cold
-  # post-reboot host the first call races the just-bound driver and creates
-  # nothing. A 15s / 30-try budget (2026-09-10, PR #11) turned out to still be
-  # too short on some boots (2026-09-12: a live vfio->nvidia rebind right after
-  # a host reboot left /dev/nvidia0 missing for well over 15s, though a manual
-  # `nvidia-modprobe -c0 -u -m` moments later worked instantly — the driver's
-  # internal probe was still settling, not stuck). Budget widened to ~60s, with
-  # a periodic nudge (re-`drivers_probe` + reload nvidia_drm) every 5s in case
-  # the probe genuinely needs a kick rather than just time, and the real
-  # nvidia-modprobe error is logged on final failure instead of swallowed.
-  local n try nvm_err
-  for try in $(seq 1 120); do
+  # nvidia-modprobe is what *creates* /dev/nvidia0 + /dev/nvidiactl, but it can
+  # only do that once the nvidia kernel module has *internally* finished
+  # registering the GPU — `Kernel driver in use: nvidia` (what cur_driver
+  # checks above) only means the PCI subsystem bound the driver; the module's
+  # own probe (vBIOS init, KMS/DRM registration, framebuffer takeover, and —
+  # after a live unbind from vfio-pci — an actual device reset) can still be
+  # running for a while after that, especially right after a host reboot.
+  # Polling nvidia-modprobe's exit status and hoping (2026-09-10 PR #11: 15s
+  # budget; 2026-09-12: still not always enough) is guessing at a timeout for
+  # a condition we can just check directly: the module publishes
+  # /proc/driver/nvidia/gpus/<BDF>/ the moment registration completes. Wait on
+  # THAT (deterministic, no arbitrary budget to tune), then create the nodes
+  # once — not in a hope-it-eventually-works loop.
+  local gpu_proc="/proc/driver/nvidia/gpus/${GPU_VGA}" waited=0
+  while [ ! -d "$gpu_proc" ] && [ "$waited" -lt 1200 ]; do sleep 0.1; waited=$((waited + 1)); done
+  if [ ! -d "$gpu_proc" ]; then
+    log "  nvidia never registered $GPU_VGA under /proc/driver/nvidia/gpus (waited ${waited}00ms)"
+    rc=1
+  else
+    [ "$waited" -gt 0 ] && log "  nvidia registered $GPU_VGA after ${waited}00ms"
+    local nvm_err
     nvm_err=$(nvidia-modprobe -c0 -u -m 2>&1) || nvm_err=$(nvidia-modprobe -c0 -u 2>&1) || true
-    local missing=0
-    for n in "${NVIDIA_NODES[@]}"; do [ -e "$n" ] || missing=1; done
-    [ "$missing" -eq 0 ] && break
-    if [ $((try % 10)) -eq 0 ]; then
-      log "  still waiting on nvidia device nodes (try $try/120): ${nvm_err:-<no output>}"
-      echo "$GPU_VGA" >/sys/bus/pci/drivers_probe 2>/dev/null || true
-      modprobe -r nvidia_drm 2>/dev/null || true
-      modprobe nvidia_drm modeset=1 fbdev=1 2>/dev/null || true
-    fi
-    sleep 0.5
-  done
+    udevadm settle --timeout=10 2>/dev/null || true
+  fi
+  local n
   for n in "${NVIDIA_NODES[@]}"; do
-    [ -e "$n" ] || { log "  $n still missing after nvidia-modprobe retries (${nvm_err:-<no output>})"; rc=1; }
+    [ -e "$n" ] || { log "  $n still missing (${nvm_err:-nvidia not yet registered})"; rc=1; }
   done
   return $rc
 }
