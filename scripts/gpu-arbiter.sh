@@ -151,18 +151,30 @@ switch_to_ubuntu() {
   # Nodes must exist before lxc binds them (the hook runs in the host ns, first).
   # nvidia-modprobe is what *creates* /dev/nvidia0 + /dev/nvidiactl; on a cold
   # post-reboot host the first call races the just-bound driver and creates
-  # nothing, so retry it inside the wait rather than poll for nodes that will
-  # never appear on their own (~15s budget).
-  local n try
-  for try in $(seq 1 30); do
-    nvidia-modprobe -c0 -u -m 2>/dev/null || nvidia-modprobe -c0 -u 2>/dev/null || true
+  # nothing. A 15s / 30-try budget (2026-09-10, PR #11) turned out to still be
+  # too short on some boots (2026-09-12: a live vfio->nvidia rebind right after
+  # a host reboot left /dev/nvidia0 missing for well over 15s, though a manual
+  # `nvidia-modprobe -c0 -u -m` moments later worked instantly — the driver's
+  # internal probe was still settling, not stuck). Budget widened to ~60s, with
+  # a periodic nudge (re-`drivers_probe` + reload nvidia_drm) every 5s in case
+  # the probe genuinely needs a kick rather than just time, and the real
+  # nvidia-modprobe error is logged on final failure instead of swallowed.
+  local n try nvm_err
+  for try in $(seq 1 120); do
+    nvm_err=$(nvidia-modprobe -c0 -u -m 2>&1) || nvm_err=$(nvidia-modprobe -c0 -u 2>&1) || true
     local missing=0
     for n in "${NVIDIA_NODES[@]}"; do [ -e "$n" ] || missing=1; done
     [ "$missing" -eq 0 ] && break
+    if [ $((try % 10)) -eq 0 ]; then
+      log "  still waiting on nvidia device nodes (try $try/120): ${nvm_err:-<no output>}"
+      echo "$GPU_VGA" >/sys/bus/pci/drivers_probe 2>/dev/null || true
+      modprobe -r nvidia_drm 2>/dev/null || true
+      modprobe nvidia_drm modeset=1 fbdev=1 2>/dev/null || true
+    fi
     sleep 0.5
   done
   for n in "${NVIDIA_NODES[@]}"; do
-    [ -e "$n" ] || { log "  $n still missing after nvidia-modprobe retries"; rc=1; }
+    [ -e "$n" ] || { log "  $n still missing after nvidia-modprobe retries (${nvm_err:-<no output>})"; rc=1; }
   done
   return $rc
 }
