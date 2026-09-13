@@ -145,24 +145,22 @@ Proxmox сам включает `tablet: 1`, когда атрибут не за
 
 ## Установка macOS Tahoe с нуля
 
-> **Статус на 2026-09-14:** VM 102 создана (`terraform apply` прошёл после
-> распечатывания Vault) с обоими образами подключенными и `tablet_device =
-> false` (см. [Что реально сработало](#что-реально-сработало) — Proxmox
-> иначе сам включает штатный tablet, что вместе с `virtio-tablet` из
-> `kvm_arguments` воспроизвело бы ровно тот cursor-freeze баг, от которого
-> `virtio-tablet` должен был спасать). **Не хватает одного шага, который
-> не может сделать токен ни при каких правах**: `args:` (куда идёт
-> `kvm_arguments` — SMC-устройство, `-cpu`-override, USB HID) Proxmox
-> прибивает к `root@pam` на уровне permission-чека в `pve-qemu-server`,
-> безусловно — тот же класс ограничения, что и `dev[n]`/`hookscript` у LXC
-> (см. [root@pam-ограничения LXC](../../README.md#rootpam-ограничения-lxc)
-> в корневом README), только раньше в этом репозитории не встречался для
-> VM. Нужно один раз выполнить от root на ноде:
-> ```bash
-> ssh pve-rog "qm set 102 --args '$(terraform -chdir=env/macos-tahoe-headless output -raw kvm_arguments)'"
-> ```
-> (значение то же самое, что лежит в `mod/vm-headless`'s `kvm_arguments`
-> output — Terraform не может это применить, а не забыл).
+> **Статус на 2026-09-14: инсталлятор реально идёт.** VM 102 создана,
+> `args:` применён от root (см. [Что реально сработало](#что-реально-сработало)
+> для двух багов, найденных только на реальном apply — `args:` жёстко
+> `root@pam`, и `tablet_device` без явного `false` не выключается),
+> recovery подтверждённо загрузился как **настоящий macOS Tahoe 26**
+> (`sw_vers`/license text подтверждают), диск `Macintosh HD` (107 ГБ)
+> стёрт под APFS, инсталлятор запущен на него — **~3ч20м** по собственной
+> оценке Apple на момент старта. Once done: Setup Assistant (разово через
+> VNC) → `systemsetup -setremotelogin on` → SSH.
+>
+> Получилось это не с первого раза — `fetch-macOS-v2.py -s tahoe` тихо
+> скачал **Sequoia**, не Tahoe (`-s`/`--shortname` не подключён к
+> `action_download` вообще, это баг апстрима — см. ниже), пришлось
+> перезаливать recovery-диск с правильными `-b`/`-os` и заново
+> пересоздавать disk-блок в Terraform (простой `import_from` update не
+> триггерит реальный re-import — тоже см. ниже).
 
 Ниже — фактически выполненные команды (не гипотетический план), см.
 [Что реально сработало](#что-реально-сработало) для деталей по каждому шагу
@@ -216,11 +214,14 @@ Proxmox сам включает `tablet: 1`, когда атрибут не за
    → volume id `local:iso/OpenCore-Tahoe.iso`.
 3. Достать recovery/BaseSystem-образ под Tahoe — прямого Apple-ISO не
    существует. `macrecovery.py` в свежем OSX-KVM переименован в
-   **`fetch-macOS-v2.py`**; `-s tahoe` поддержан, дефолтный `--board-id`
-   (`Mac-27AD2F918AE68F61`) уже соответствует `MacPro7,1`:
+   **`fetch-macOS-v2.py`**. **Не используйте `-s`/`--shortname`** — оно
+   разбирается argparse, но `--action download` его тихо игнорирует
+   (см. [Что реально сработало](#что-реально-сработало)); нужны явные
+   `-b`/`-os`:
    ```bash
    git clone --depth 1 https://github.com/kholia/OSX-KVM.git
-   python3 OSX-KVM/fetch-macOS-v2.py --action download -s tahoe -o recovery
+   python3 OSX-KVM/fetch-macOS-v2.py --action download \
+     -b Mac-CFF7D910A743CAAF -os latest -o recovery
    ```
    Даёт `BaseSystem.dmg` (compressed UDIF) + `.chunklist`. Конвертация в
    raw — **`qemu-img` умеет читать `dmg` нативно**, отдельный `dmg2img` не
@@ -283,7 +284,7 @@ README оказался авторитетнее и **разошёлся с пе
 | `-device usb-tablet` | `-device virtio-tablet` + `tablet_device = false` явно | На macOS 26 у tablet-указателя есть задокументированный баг подвисания курсора; их "better fix" — `virtio-tablet` вместо Proxmox-нативного tablet-режима. Просто убрать атрибут из ресурса — не то же самое, что выключить его (см. ниже, "Найдено уже при реальном `terraform apply`"). |
 | SMBIOS `iMac19,1` (дефолт самого ISO) | `MacPro7,1` | `iMac19,1` не входит в официально поддерживаемый Tahoe список (см. шаг 1 выше) — дефолт ISO рассчитан на широкий диапазон версий (Tiger...Tahoe одним образом), не на Tahoe конкретно. |
 | Серийники — предполагался GenSMBIOS (Python-GUI, менюшный) | Бинарник `macserial.linux` напрямую | GenSMBIOS — это просто интерактивная обёртка вокруг того же бинарника; `macserial.linux --model MacPro7,1 --generate` даёт то же самое без диалогового меню, полностью скриптуется. |
-| `macrecovery.py` (по имени из старых гайдов) | `fetch-macOS-v2.py` | В текущем OSX-KVM файл переименован; `-s tahoe` в нём поддержан из коробки. |
+| `macrecovery.py` (по имени из старых гайдов) | `fetch-macOS-v2.py` | В текущем OSX-KVM файл переименован. **`-s`/`--shortname` при этом не работает с `--action download`** — см. ниже, "Найдено уже при реальном `terraform apply`". |
 | Планировался `dmg2img` для конвертации BaseSystem | `qemu-img convert -f dmg -O raw` | `qemu-img` эту версии Debian/Ubuntu-сборки уже умеет читать `dmg` нативно — отдельная утилита не понадобилась. |
 | `import` на storage `local` — предполагалось "может понадобиться включить" | Действительно было выключено, включили: `pvesm set local --content iso,vztmpl,snippets,backup,import` | Подтверждённый, не гипотетический шаг. |
 | `xorriso -map ... -commit` для патча ISO | Тот же `-map`, но обязательно `+ -boot_image any replay` | Без этого флага xorriso молча выбрасывает El Torito boot record ("Discarded boot image from old session") — патченный ISO собирался бы, но не грузился. |
@@ -296,7 +297,7 @@ LongQT-sea — совпало с изначальным расчётом на н
 
 ### Найдено уже при реальном `terraform apply` (не по гайдам)
 
-Два момента, которые не всплыли ни в одном источнике выше — только на
+Четыре момента, которые не всплыли ни в одном источнике выше — только на
 живой ноде:
 
 - **`kvm_arguments` (`args:`) — жёстко `root@pam`-only, безусловно.**
@@ -322,6 +323,53 @@ LongQT-sea — совпало с изначальным расчётом на н
   избежать. Исправлено: `tablet_device = false` теперь явно прописан в
   `mod/vm-headless/main.tf` (не переменная — это фиксированное архитектурное
   решение, а не то, что имеет смысл включать пользователю).
+- **После ручного `qm set --args` следующий `terraform plan` хочет это
+  занулить.** `refresh` читает реальный `args:` с ноды в state; ресурс,
+  который про `kvm_arguments` больше ничего не говорит, читается
+  Terraform'ом как "должно быть `null`" — `apply` попытался бы стереть
+  то, что вы только что вручную поставили (и, вероятно, упал бы с той же
+  `root@pam`-ошибкой, пытаясь это сделать). Исправлено добавлением
+  `lifecycle { ignore_changes = [kvm_arguments] }` в ресурс — тот же
+  приём, которым `mod/ct` уже защищает `hook_script_file_id` от точно
+  такой же ситуации.
+- **`fetch-macOS-v2.py -s tahoe --action download` тихо скачивает не
+  Tahoe.** `-s`/`--shortname` разбирается `argparse`, но `action_download`
+  (единственный код-путь, который реально выполняется при
+  `--action download`) его **не читает вообще** — использует только
+  `--board-id`/`--mlb`/`-os`, с дефолтами `RECENT_MAC` +
+  `os_type=default`. `-s tahoe` без явного action молча падает в
+  demo-меню-код с отдельным списком `products`, который `action_download`
+  не видит. Результат первой попытки — реальный macOS **15.4.1 Sequoia**
+  под видом "тахо" (подтверждено `sw_vers`/`SystemVersion.plist` внутри
+  самой Recovery уже на живой VM, не заранее). Рабочий вызов — явные
+  флаги из того же `products`-списка:
+  ```bash
+  python3 fetch-macOS-v2.py --action download -b Mac-CFF7D910A743CAAF -os latest -o out
+  ```
+  (board-id `Mac-CFF7D910A743CAAF` — тот, что скрипт сам помечает как
+  `"Tahoe (26)"` в неиспользуемом для download-пути каталоге; не имеет
+  отношения к SMBIOS `MacPro7,1` в OpenCore — recovery board-id только
+  выбирает, какой каталог/сборку у Apple качать, не то, чем система
+  представится после установки).
+- **Смена `import_from` на существующем `disk`-блоке не переимпортирует
+  содержимое.** После первой ошибки выше попытка просто заменить
+  `installer_image_file_id` на правильный volume id и переприменить дала
+  `Modifications complete after 1s` — подозрительно быстро для 2.6 ГБ.
+  Так и оказалось: `qm config` продолжал показывать старый размер диска
+  (`8G`, как у неверного образа), реальные байты не переехали — провайдер
+  просто обновил `import_from` в state, не вызвав повторный импорт (это
+  атрибут "разово при создании", не то, что Proxmox умеет применять
+  повторно к уже существующему диску). Рабочий путь — **удалить** диск
+  (`installer_image_file_id = null`, apply) и **добавить заново**
+  (вернуть верное значение, apply) — тогда это настоящий `+ disk` в
+  плане, а не `~`, и происходит настоящий новый импорт (диск получил
+  новый `path_in_datastore`, `vm-102-disk-3`, с честным размером `2548M`,
+  совпадающим с виртуальным размером настоящего Tahoe `BaseSystem.dmg`).
+  Дополнительно: если VM в этот момент запущена, сама попытка
+  detach-then-attach диска валится отдельной ошибкой (`hotplug problem -
+  can't unplug device 'sata1'`) — recoveryOS не подтверждает ACPI
+  hot-unplug для SATA на лету так же охотно, как Linux-гости; надёжнее
+  сначала штатно остановить VM, потом уже трогать диски.
 
 ## Доступ
 

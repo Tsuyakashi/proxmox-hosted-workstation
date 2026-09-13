@@ -99,4 +99,15 @@ resource "proxmox_virtual_environment_vm" "this" {
   operating_system {
     type = var.os_type
   }
+
+  lifecycle {
+    # Without this, `plan` sees the root@pam-applied `args:` value that
+    # `refresh` read back from the API, compares it against this resource's
+    # silence on kvm_arguments, and wants to null it out -- which either
+    # fails the same "only root can set 'args' config" way, or (worse)
+    # actually clears the one-time manual step. Same idiom mod/ct already
+    # uses for hook_script_file_id -- a node-managed field Terraform must
+    # not fight over.
+    ignore_changes = [kvm_arguments]
+  }
 }
