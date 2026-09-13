@@ -169,13 +169,36 @@ switch_to_ubuntu() {
     rc=1
   else
     [ "$waited" -gt 0 ] && log "  nvidia registered $GPU_VGA after ${waited}00ms"
-    local nvm_err
-    nvm_err=$(nvidia-modprobe -c0 -u -m 2>&1) || nvm_err=$(nvidia-modprobe -c0 -u 2>&1) || true
+    # nvidia-modprobe is unreliable: 2026-09-13, `strace` showed it read
+    # /proc/devices + /proc/driver/nvidia/params and exited 0 WITHOUT ever
+    # calling mknod — it decided (wrongly, on this box: /dev is not devtmpfs
+    # auto-managed by the driver) that creating the nodes wasn't its job.
+    # Still try it first (harmless, occasionally does the job), then fall
+    # back to creating the nodes ourselves: major from /proc/devices, minor
+    # from documented NVIDIA convention / the driver's own per-GPU proc entry.
+    # This is not a race anymore — it's a plain mknod, deterministic.
+    nvidia-modprobe -c0 -u -m 2>/dev/null || nvidia-modprobe -c0 -u 2>/dev/null || true
     udevadm settle --timeout=10 2>/dev/null || true
+
+    _char_major() { awk -v n="$1" '$2==n{print $1; exit}' /proc/devices; }
+    _ensure_node() { # $1 path  $2 major  $3 minor
+      [ -e "$1" ] && return 0
+      [ -n "${2:-}" ] && [ -n "${3:-}" ] || { log "  can't mknod $1 (major/minor unknown)"; return 1; }
+      mknod -m 666 "$1" c "$2" "$3" 2>/dev/null || { log "  mknod $1 c $2 $3 failed"; return 1; }
+      log "  created $1 (c $2 $3)"
+    }
+    local gpu_minor uvm_major
+    gpu_minor=$(sed -n 's/^Device Minor:[[:space:]]*//p' "${gpu_proc}/information" 2>/dev/null)
+    uvm_major=$(_char_major nvidia-uvm)
+    _ensure_node /dev/nvidia0         "$(_char_major nvidia)"          "${gpu_minor:-0}"
+    _ensure_node /dev/nvidiactl       "$(_char_major nvidiactl)"       255
+    _ensure_node /dev/nvidia-modeset  "$(_char_major nvidia-modeset)"  254
+    _ensure_node /dev/nvidia-uvm       "$uvm_major" 0
+    _ensure_node /dev/nvidia-uvm-tools "$uvm_major" 1
   fi
   local n
   for n in "${NVIDIA_NODES[@]}"; do
-    [ -e "$n" ] || { log "  $n still missing (${nvm_err:-nvidia not yet registered})"; rc=1; }
+    [ -e "$n" ] || { log "  $n still missing"; rc=1; }
   done
   return $rc
 }
