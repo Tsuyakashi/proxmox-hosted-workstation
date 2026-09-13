@@ -75,8 +75,6 @@ resource "proxmox_virtual_environment_vm" "this" {
     type = var.vga_type
   }
 
-  tablet_device = var.tablet_device
-
   # OpenCore/XNU bits with no first-class Proxmox VM attribute -- SMC device,
   # spoofed SMBIOS type 2, USB HID, and the -cpu override. See variables.tf
   # for sourcing and caveats.

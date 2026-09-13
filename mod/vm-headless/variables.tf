@@ -125,18 +125,15 @@ variable "vga_type" {
   default     = "std"
 }
 
-variable "tablet_device" {
-  description = "USB tablet for absolute pointer positioning over VNC/Screen Sharing."
-  type        = bool
-  default     = true
-}
-
 variable "kvm_arguments" {
   description = <<-EOT
     Raw QEMU command-line additions OpenCore/XNU need that no Proxmox VM
     attribute expresses: the SMC device (with the OSK string every OSX-KVM/
     OpenCore guide uses -- it's a public placeholder, not a real Mac's key),
-    a spoofed SMBIOS type 2, USB HID devices, and the -cpu override that adds
+    a spoofed SMBIOS type 2, USB HID devices (usb-kbd/usb-tablet -- only
+    matter for the OpenCore picker/Recovery/Setup Assistant over VNC; once
+    SSH is set up they just sit idle, not worth splitting into a separate
+    install-time-only argument set), and the -cpu override that adds
     vendor=GenuineIntel/+invtsc/+hypervisor/vmware-cpuid-freq=on on top of
     `host` (passes through the real Haswell instruction set, incl. AVX2,
     rather than emulating a named CPU model that might not include it).

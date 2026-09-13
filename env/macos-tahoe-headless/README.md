@@ -46,7 +46,7 @@ passthrough. `mod/vm` целиком построен вокруг
 `proxmox_hardware_mapping_pci` / `hostpci` для *whole-workstation*
 GPU-передачи одному из двух взаимоисключающих гостей на `bare-pve`; здесь
 этой темы нет вообще, а нужный набор атрибутов (`kvm_arguments`, `vga`,
-`tablet_device`, второй опциональный `disk` для install-media) — свой.
+второй опциональный `disk` для install-media) — свой.
 Смешивать это в один модуль с флагом-переключателем усложнило бы оба случая
 ради несуществующей переиспользуемости — GPU-workstation и headless-VM без
 GPU не разделяют почти ничего в конфигурации ресурса, кроме `machine`/`bios`.
@@ -132,8 +132,7 @@ mod/vm-headless/
 | `network_model`                 | string  | `vmxnet3`     | Нативный macOS-драйвер                                             |
 | `os_type`                       | string  | `other`       | У Proxmox нет `ostype` для macOS                                  |
 | `vga_type`                      | string  | `std`         | Программный framebuffer, без ускорения                            |
-| `tablet_device`                 | bool    | `true`        | USB-таблет для VNC/Screen Sharing курсора                          |
-| `kvm_arguments`                 | string  | см. код       | SMC-устройство, SMBIOS type 2, USB HID, `-cpu`-override            |
+| `kvm_arguments`                 | string  | см. код       | SMC-устройство, SMBIOS type 2, USB HID (`usb-kbd`/`usb-tablet` — курсор/клавиатура для VNC, единственный источник истины, не дублируются Proxmox-атрибутом), `-cpu`-override |
 | `efi_pre_enrolled_keys`         | bool    | `false`       | Secure Boot должен быть выключен — OpenCore не подписан            |
 
 ## Установка macOS Tahoe с нуля
