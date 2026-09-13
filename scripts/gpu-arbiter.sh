@@ -149,20 +149,56 @@ switch_to_ubuntu() {
   [ "$(cur_driver "$GPU_VGA")" = nvidia ] || { log "  GPU did not bind nvidia"; return 1; }
 
   # Nodes must exist before lxc binds them (the hook runs in the host ns, first).
-  # nvidia-modprobe is what *creates* /dev/nvidia0 + /dev/nvidiactl; on a cold
-  # post-reboot host the first call races the just-bound driver and creates
-  # nothing, so retry it inside the wait rather than poll for nodes that will
-  # never appear on their own (~15s budget).
-  local n try
-  for try in $(seq 1 30); do
+  # nvidia-modprobe is what *creates* /dev/nvidia0 + /dev/nvidiactl, but it can
+  # only do that once the nvidia kernel module has *internally* finished
+  # registering the GPU — `Kernel driver in use: nvidia` (what cur_driver
+  # checks above) only means the PCI subsystem bound the driver; the module's
+  # own probe (vBIOS init, KMS/DRM registration, framebuffer takeover, and —
+  # after a live unbind from vfio-pci — an actual device reset) can still be
+  # running for a while after that, especially right after a host reboot.
+  # Polling nvidia-modprobe's exit status and hoping (2026-09-10 PR #11: 15s
+  # budget; 2026-09-12: still not always enough) is guessing at a timeout for
+  # a condition we can just check directly: the module publishes
+  # /proc/driver/nvidia/gpus/<BDF>/ the moment registration completes. Wait on
+  # THAT (deterministic, no arbitrary budget to tune), then create the nodes
+  # once — not in a hope-it-eventually-works loop.
+  local gpu_proc="/proc/driver/nvidia/gpus/${GPU_VGA}" waited=0
+  while [ ! -d "$gpu_proc" ] && [ "$waited" -lt 1200 ]; do sleep 0.1; waited=$((waited + 1)); done
+  if [ ! -d "$gpu_proc" ]; then
+    log "  nvidia never registered $GPU_VGA under /proc/driver/nvidia/gpus (waited ${waited}00ms)"
+    rc=1
+  else
+    [ "$waited" -gt 0 ] && log "  nvidia registered $GPU_VGA after ${waited}00ms"
+    # nvidia-modprobe is unreliable: 2026-09-13, `strace` showed it read
+    # /proc/devices + /proc/driver/nvidia/params and exited 0 WITHOUT ever
+    # calling mknod — it decided (wrongly, on this box: /dev is not devtmpfs
+    # auto-managed by the driver) that creating the nodes wasn't its job.
+    # Still try it first (harmless, occasionally does the job), then fall
+    # back to creating the nodes ourselves: major from /proc/devices, minor
+    # from documented NVIDIA convention / the driver's own per-GPU proc entry.
+    # This is not a race anymore — it's a plain mknod, deterministic.
     nvidia-modprobe -c0 -u -m 2>/dev/null || nvidia-modprobe -c0 -u 2>/dev/null || true
-    local missing=0
-    for n in "${NVIDIA_NODES[@]}"; do [ -e "$n" ] || missing=1; done
-    [ "$missing" -eq 0 ] && break
-    sleep 0.5
-  done
+    udevadm settle --timeout=10 2>/dev/null || true
+
+    _char_major() { awk -v n="$1" '$2==n{print $1; exit}' /proc/devices; }
+    _ensure_node() { # $1 path  $2 major  $3 minor
+      [ -e "$1" ] && return 0
+      [ -n "${2:-}" ] && [ -n "${3:-}" ] || { log "  can't mknod $1 (major/minor unknown)"; return 1; }
+      mknod -m 666 "$1" c "$2" "$3" 2>/dev/null || { log "  mknod $1 c $2 $3 failed"; return 1; }
+      log "  created $1 (c $2 $3)"
+    }
+    local gpu_minor uvm_major
+    gpu_minor=$(sed -n 's/^Device Minor:[[:space:]]*//p' "${gpu_proc}/information" 2>/dev/null)
+    uvm_major=$(_char_major nvidia-uvm)
+    _ensure_node /dev/nvidia0         "$(_char_major nvidia)"          "${gpu_minor:-0}"
+    _ensure_node /dev/nvidiactl       "$(_char_major nvidiactl)"       255
+    _ensure_node /dev/nvidia-modeset  "$(_char_major nvidia-modeset)"  254
+    _ensure_node /dev/nvidia-uvm       "$uvm_major" 0
+    _ensure_node /dev/nvidia-uvm-tools "$uvm_major" 1
+  fi
+  local n
   for n in "${NVIDIA_NODES[@]}"; do
-    [ -e "$n" ] || { log "  $n still missing after nvidia-modprobe retries"; rc=1; }
+    [ -e "$n" ] || { log "  $n still missing"; rc=1; }
   done
   return $rc
 }
