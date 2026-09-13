@@ -135,23 +135,34 @@ mod/vm-headless/
 | `network_model`                 | string  | `virtio`      | Актуальная рекомендация LongQT-sea для macOS 11-26                 |
 | `os_type`                       | string  | `l26`         | У Proxmox нет `ostype` для macOS; `l26` ("Linux") — явная рекомендация LongQT-sea, не `other` |
 | `vga_type`                      | string  | `std`         | Программный framebuffer, без ускорения                            |
-| `kvm_arguments`                 | string  | см. код       | SMC-устройство, SMBIOS type 2, USB HID (`usb-kbd`/`virtio-tablet`), `-cpu Skylake-Client-v4,vendor=GenuineIntel` (не `host` — см. [Что реально сработало](#что-реально-сработало)) |
+| `kvm_arguments`                 | string  | см. код       | **Не применяется ресурсом** (Proxmox: `args:` только `root@pam`, см. [Что реально сработало](#что-реально-сработало)) — доступно через output модуля, применить вручную `qm set <vmid> --args '...'` |
 | `efi_pre_enrolled_keys`         | bool    | `false`       | Secure Boot должен быть выключен — OpenCore не подписан            |
+
+`tablet_device = false` прописан в ресурсе фиксированно, не переменной —
+Proxmox сам включает `tablet: 1`, когда атрибут не задан вовсе, что вместе
+с `virtio-tablet` из `kvm_arguments` дало бы дублирующийся указатель (см.
+[Что реально сработало](#что-реально-сработало)).
 
 ## Установка macOS Tahoe с нуля
 
-> **Статус на 2026-09-14:** шаги 1-4 (сборка OpenCore ISO, генерация SMBIOS,
-> загрузка recovery-образа, обе загрузки на `pve-rog`) выполнены и
-> проверены — файлы реально лежат на ноде, чексуммы сверены,
-> `pvesm list local --content import` их видит. Шаг 5 (`terraform apply`,
-> создание самой VM) **не выполнен** — заблокирован тем, что Vault
-> (источник `proxmox_api_token`/MinIO-credentials для `apply-wrapper.sh`)
-> запечатан (`vault status` → sealed), а credentials/прямые
-> `qm create`-команды на ноде — не то, что можно обойти самостоятельно
-> (см. [Известные ограничения](#известные-ограничения)). Артефакты на
-> `pve-rog` дожидаются: `local:iso/OpenCore-Tahoe.iso`,
-> `local:import/BaseSystem.raw`. Как только Vault распечатан — шаги 5-8
-> ниже готовы к выполнению как есть, без дополнительной подготовки.
+> **Статус на 2026-09-14:** VM 102 создана (`terraform apply` прошёл после
+> распечатывания Vault) с обоими образами подключенными и `tablet_device =
+> false` (см. [Что реально сработало](#что-реально-сработало) — Proxmox
+> иначе сам включает штатный tablet, что вместе с `virtio-tablet` из
+> `kvm_arguments` воспроизвело бы ровно тот cursor-freeze баг, от которого
+> `virtio-tablet` должен был спасать). **Не хватает одного шага, который
+> не может сделать токен ни при каких правах**: `args:` (куда идёт
+> `kvm_arguments` — SMC-устройство, `-cpu`-override, USB HID) Proxmox
+> прибивает к `root@pam` на уровне permission-чека в `pve-qemu-server`,
+> безусловно — тот же класс ограничения, что и `dev[n]`/`hookscript` у LXC
+> (см. [root@pam-ограничения LXC](../../README.md#rootpam-ограничения-lxc)
+> в корневом README), только раньше в этом репозитории не встречался для
+> VM. Нужно один раз выполнить от root на ноде:
+> ```bash
+> ssh pve-rog "qm set 102 --args '$(terraform -chdir=env/macos-tahoe-headless output -raw kvm_arguments)'"
+> ```
+> (значение то же самое, что лежит в `mod/vm-headless`'s `kvm_arguments`
+> output — Terraform не может это применить, а не забыл).
 
 Ниже — фактически выполненные команды (не гипотетический план), см.
 [Что реально сработало](#что-реально-сработало) для деталей по каждому шагу
@@ -269,7 +280,7 @@ README оказался авторитетнее и **разошёлся с пе
 | `network_model = vmxnet3` | `network_model = virtio` | Их таблица прямо называет `VirtIO` для macOS 11-26; `vmxnet3` — только для 10.11-10.15. |
 | `os_type = other` | `os_type = l26` | Их пошаговая инструкция явно говорит оставить Guest OS Type на дефолте ("Linux") — это `l26` в Proxmox, не `other`. |
 | `cores = 6` (плашмя) | `cores = 2`, `sockets = 3` | Их CPU-раздел прямо предупреждает: ядра должны быть степенью двойки, иначе используйте `sockets` (с готовой таблицей соответствий, включая ровно "6 -> 2×3"). Плоские 6 ядер на одном сокете — кандидат в boot failure по их же формулировке ("incorrect CPU configuration will cause boot failure"). |
-| `-device usb-tablet` | `-device virtio-tablet` | На macOS 26 у tablet-указателя есть задокументированный баг подвисания курсора; их "better fix" — `virtio-tablet` вместо `usb-tablet`/Proxmox-нативного tablet-режима (отсюда же и более раннее решение убрать `tablet_device` из модуля целиком). |
+| `-device usb-tablet` | `-device virtio-tablet` + `tablet_device = false` явно | На macOS 26 у tablet-указателя есть задокументированный баг подвисания курсора; их "better fix" — `virtio-tablet` вместо Proxmox-нативного tablet-режима. Просто убрать атрибут из ресурса — не то же самое, что выключить его (см. ниже, "Найдено уже при реальном `terraform apply`"). |
 | SMBIOS `iMac19,1` (дефолт самого ISO) | `MacPro7,1` | `iMac19,1` не входит в официально поддерживаемый Tahoe список (см. шаг 1 выше) — дефолт ISO рассчитан на широкий диапазон версий (Tiger...Tahoe одним образом), не на Tahoe конкретно. |
 | Серийники — предполагался GenSMBIOS (Python-GUI, менюшный) | Бинарник `macserial.linux` напрямую | GenSMBIOS — это просто интерактивная обёртка вокруг того же бинарника; `macserial.linux --model MacPro7,1 --generate` даёт то же самое без диалогового меню, полностью скриптуется. |
 | `macrecovery.py` (по имени из старых гайдов) | `fetch-macOS-v2.py` | В текущем OSX-KVM файл переименован; `-s tahoe` в нём поддержан из коробки. |
@@ -282,6 +293,35 @@ README оказался авторитетнее и **разошёлся с пе
 memory (balloon), `AppleMCEReporterDisabler.kext` (уже был в поставке
 LongQT-sea — совпало с изначальным расчётом на не-Xeon CPU под `MacPro7,1`),
 `csr-active-config=00000000` (SIP on, дефолт ISO).
+
+### Найдено уже при реальном `terraform apply` (не по гайдам)
+
+Два момента, которые не всплыли ни в одном источнике выше — только на
+живой ноде:
+
+- **`kvm_arguments` (`args:`) — жёстко `root@pam`-only, безусловно.**
+  `terraform apply` с этим полем в ресурсе падает с `HTTP 500: only root
+  can set 'args' config` — токен тут не при чём, никакая роль/ACL это не
+  чинит (в `pve-qemu-server` это `raise_perm_exc` без проверки прав, тот
+  же паттерн, что и `dev[n]`/`hookscript` у LXC, см. корневой README).
+  `mod/vm-headless` больше не пытается установить `kvm_arguments` в самом
+  ресурсе — значение доступно через output `kvm_arguments` у модуля и у
+  этого env, применяется **один раз вручную** от root на ноде:
+  ```bash
+  ssh <node> "qm set <vmid> --args '<значение из terraform output>'"
+  ```
+  Повторять только если `terraform apply` пересоздаёт VM (не после
+  обычных in-place изменений).
+- **Убрать `tablet_device` из ресурса ≠ отключить tablet.** Предыдущая
+  правка (по итогам код-ревью) убрала атрибут из `mod/vm-headless`
+  целиком, рассчитывая, что тогда tablet вообще не появится. На практике
+  Proxmox сам подставляет `tablet: 1`, когда атрибут не задан вовсе —
+  реальный `qm config` только что созданной VM это подтвердил. С
+  `virtio-tablet` из `kvm_arguments` это дало бы ровно тот дубль
+  usb-tablet + virtio-tablet, которого «better fix» LongQT-sea должен был
+  избежать. Исправлено: `tablet_device = false` теперь явно прописан в
+  `mod/vm-headless/main.tf` (не переменная — это фиксированное архитектурное
+  решение, а не то, что имеет смысл включать пользователю).
 
 ## Доступ
 
@@ -318,17 +358,21 @@ LongQT-sea — совпало с изначальным расчётом на н
   hackintosh), но конкретно эта комбинация (Proxmox + QEMU + Haswell +
   MacPro7,1 + Tahoe) не была массово обкатана сообществом на момент
   написания — ожидать итераций по kext-списку/quirks.
-- **`kvm_arguments` — стартовый набор, не гарантия.** Значение по
-  умолчанию в `mod/vm-headless/variables.tf` взято из актуального (2025-
-  2026) гайда Proxmox+Tahoe (archy.net, см. [Источники](#источники)), но
-  не проверено на именно этой ноде/степпинге CPU. Первое, что стоит
-  диагностировать при проблемах загрузки — csr-active-config, USB-квирки
-  (`nec-usb-xhci.msi=off` и т.п.), и совместимость `vmxnet3` конкретно с
-  Tahoe (при проблемах — откат на `e1000-82545em`, тоже нативный).
-  Аудио-кексты (`AppleALC`/`VoodooHDA`) намеренно не добавлены — headless
-  backend не воспроизводит звук; учитывайте, что в Tahoe `AppleHDA.kext`
-  всё равно убран из системы (см. tahoe.html), так что аналоговый звук
-  через AppleALC в любом случае сломан, если он вдруг понадобится.
+- **`kvm_arguments` не применяется `terraform apply` — только output.**
+  Proxmox жёстко привязывает `args:` к `root@pam`, безусловно (см. [Что
+  реально сработало](#что-реально-сработало)). После **любого** apply,
+  который пересоздаёт VM (не после обычных in-place правок), нужно заново
+  выполнить `qm set <vmid> --args '<terraform output kvm_arguments>'` от
+  root на ноде — Terraform об этом не напомнит, `plan` не покажет разницу
+  (поле вне ресурса).
+- **`kvm_arguments` — рабочий набор из активно поддерживаемого источника
+  (LongQT-sea/OpenCore-ISO), не гарантия для конкретно этой ноды.**
+  Пока не загружен реальной сборкой Xcode — считать проверенным только до
+  стадии "грузится и отвечает по SSH", не более. Аудио-кексты
+  (`AppleALC`/`VoodooHDA`) намеренно не добавлены — headless backend не
+  воспроизводит звук; в Tahoe `AppleHDA.kext` всё равно убран из системы
+  (см. tahoe.html), так что аналоговый звук через AppleALC в любом случае
+  сломан, если он вдруг понадобится.
 - **`import_from` требует content-type `import` на storage** — новее, чем
   `iso`/`vztmpl`; на непроверенном `pve-rog` может потребоваться ручное
   включение (`pvesm set`), см. [Требования](#требования).

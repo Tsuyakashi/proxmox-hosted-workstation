@@ -76,10 +76,25 @@ resource "proxmox_virtual_environment_vm" "this" {
     type = var.vga_type
   }
 
-  # OpenCore/XNU bits with no first-class Proxmox VM attribute -- SMC device,
-  # spoofed SMBIOS type 2, USB HID, and the -cpu override. See variables.tf
-  # for sourcing and caveats.
-  kvm_arguments = var.kvm_arguments
+  # Proxmox's OWN tablet emulation defaults to true regardless of whether
+  # this resource sets anything -- simply omitting the attribute does NOT
+  # mean "no tablet" (confirmed empirically: a fresh VM came up with
+  # `tablet: 1` with no tablet_device line in this resource at all). Must
+  # be explicit false: kvm_arguments' `-device virtio-tablet` is the one
+  # and only pointer device, per LongQT-sea's documented macOS-26 cursor-
+  # freeze fix (their "better fix" starts with disabling Proxmox's native
+  # tablet before adding virtio-tablet -- having both back is exactly the
+  # bug that fix exists to avoid).
+  tablet_device = false
+
+  # kvm_arguments (-> Proxmox's `args:` config key) is NOT set here. Proxmox
+  # hard-restricts `args:` to root@pam regardless of API token privileges --
+  # same class of restriction this repo already documents for LXC's
+  # `dev[n]`/`hookscript` (see root README "root@pam-ограничения LXC").
+  # Confirmed empirically: `terraform apply` with this set fails with
+  # "only root can set 'args' config" (HTTP 500), token or not. Apply
+  # var.kvm_arguments by hand on the node instead -- see the `kvm_arguments`
+  # output and the env README's install steps.
 
   operating_system {
     type = var.os_type
