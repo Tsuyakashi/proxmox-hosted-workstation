@@ -17,6 +17,11 @@ Terraform-конфигурация для развёртывания рабоч�
 Оба варианта нацелены на одно железо и **взаимоисключающи** — см.
 [Архитектура](#архитектура).
 
+Отдельно, независимо от этой пары и от ноды `bare-pve` — **`env/macos-tahoe-headless`**:
+headless macOS Tahoe VM (OpenCore, без GPU) на ноде `pve-rog`, backend для
+сборок под Xcode. Не участвует в GPU-мьютексе выше, своя документация в
+[`env/macos-tahoe-headless/README.md`](env/macos-tahoe-headless/README.md).
+
 ## Содержание
 
 - [Стек](#стек)
@@ -30,6 +35,7 @@ Terraform-конфигурация для развёртывания рабоч�
 - [Использование](#использование)
 - [Переменные](#переменные)
 - [Известные ограничения](#известные-ограничения)
+- [macOS Tahoe headless (env/macos-tahoe-headless)](#macos-tahoe-headless-envmacos-tahoe-headless)
 - [Заметки](#заметки)
 
 ## Стек
@@ -785,6 +791,16 @@ Proxmox сам добавляет `kvm=off` + `hv_vendor_id` при `ostype = wi
 ставится без Code 43. Если всё же вылезет —
 `qm set <vmid> -args "-cpu host,kvm=off,hv_vendor_id=whatever,-hypervisor"`
 (bpg-провайдер raw-`args` не поддерживает) или через hookscript.
+
+## macOS Tahoe headless (env/macos-tahoe-headless)
+
+Третья, независимая среда — не участвует в GPU-мьютексе `bare-pve` выше,
+другая нода (`pve-rog`), без GPU вообще. `mod/vm-headless` — отдельный
+модуль (не `mod/vm`): нет `hardware_mapping_pci`, нет `hostpci`, зато есть
+`kvm_arguments` (raw QEMU args для OpenCore/SMC/SMBIOS-спуфинга) и
+OpenCore-загрузчик через `cdrom`. Полная документация, установка с нуля и
+честный список ограничений (headless-only, без Metal-ускорения) —
+[`env/macos-tahoe-headless/README.md`](env/macos-tahoe-headless/README.md).
 
 ## Заметки
 
