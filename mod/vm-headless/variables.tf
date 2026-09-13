@@ -7,8 +7,20 @@ variable "node_name" {
 }
 
 variable "cores" {
-  type    = number
-  default = 1
+  description = <<-EOT
+    Cores per socket. macOS's CPU-topology parsing wants a power-of-2 core
+    count -- for any other total, split it across `sockets` instead of
+    raising this alone (e.g. 6 total -> cores=2, sockets=3, not cores=6).
+    See LongQT-sea/OpenCore-ISO's CPU section for the general table.
+  EOT
+  type        = number
+  default     = 1
+}
+
+variable "sockets" {
+  description = "See `cores` -- total vCPUs is cores * sockets."
+  type        = number
+  default     = 1
 }
 
 variable "memory" {
@@ -26,16 +38,24 @@ variable "memory" {
 variable "cpu_type" {
   description = <<-EOT
     Base Proxmox `cpu:` model. Cosmetic more than functional here: `kvm_arguments`
-    appends a second, more specific `-cpu host,vendor=GenuineIntel,...` to the
-    actual QEMU command line, and QEMU keeps the *last* `-cpu` it parses -- that
-    one wins. Kept as "host" so the two never meaningfully disagree.
+    appends a second, more specific `-cpu` to the actual QEMU command line, and
+    QEMU keeps the *last* `-cpu` it parses -- that one wins. Kept as "host" so
+    the two never meaningfully disagree; see `kvm_arguments` for why the real
+    override is a named model, not `host` passthrough.
   EOT
   type        = string
   default     = "host"
 }
 
 variable "agent_enabled" {
-  description = "QEMU guest agent channel. No stock macOS build speaks it -- leave false unless a community qemu-ga port is installed in-guest."
+  description = <<-EOT
+    QEMU guest agent channel. Stock macOS has no built-in qemu-ga -- leave
+    false (same footgun as env/windows: Proxmox waits out a timeout on
+    every shutdown for an agent that never answers) unless/until a
+    community qemu-ga port is actually installed in-guest. LongQT-sea/
+    OpenCore-ISO recommends enabling this for macOS 10.14-26, but that
+    assumes such a port is present -- it isn't, here, yet.
+  EOT
   type        = bool
   default     = false
 }
@@ -108,15 +128,15 @@ variable "mac" {
 }
 
 variable "network_model" {
-  description = "vmxnet3 has a native in-box macOS driver (no kext) and is the current community-recommended NIC for QEMU macOS guests -- e1000 also works natively if vmxnet3 gives trouble."
+  description = "virtio -- LongQT-sea/OpenCore-ISO's current guidance for macOS 11-26 (their OpenCore build carries the kext virtio networking needs). vmxnet3/e1000 are older-macOS fallbacks, not preferred here."
   type        = string
-  default     = "vmxnet3"
+  default     = "virtio"
 }
 
 variable "os_type" {
-  description = "Proxmox has no macOS ostype -- \"other\" is the standard choice in every hackintosh-on-Proxmox guide."
+  description = "Proxmox has no macOS ostype. l26 (\"Linux\") -- LongQT-sea/OpenCore-ISO's explicit recommendation (affects Proxmox's own RTC/clock defaults, not something macOS itself reads) -- not \"other\"."
   type        = string
-  default     = "other"
+  default     = "l26"
 }
 
 variable "vga_type" {
@@ -130,21 +150,28 @@ variable "kvm_arguments" {
     Raw QEMU command-line additions OpenCore/XNU need that no Proxmox VM
     attribute expresses: the SMC device (with the OSK string every OSX-KVM/
     OpenCore guide uses -- it's a public placeholder, not a real Mac's key),
-    a spoofed SMBIOS type 2, USB HID devices (usb-kbd/usb-tablet -- only
+    a spoofed SMBIOS type 2, USB HID devices (usb-kbd/virtio-tablet -- only
     matter for the OpenCore picker/Recovery/Setup Assistant over VNC; once
     SSH is set up they just sit idle, not worth splitting into a separate
-    install-time-only argument set), and the -cpu override that adds
-    vendor=GenuineIntel/+invtsc/+hypervisor/vmware-cpuid-freq=on on top of
-    `host` (passes through the real Haswell instruction set, incl. AVX2,
-    rather than emulating a named CPU model that might not include it).
+    install-time-only argument set), and the -cpu override.
 
-    Sourced from current (2025/2026) Proxmox+macOS-Tahoe community guides
-    (e.g. archy.net's "Installing macOS Tahoma as a Proxmox VM") -- treat as
-    a verified-elsewhere starting point, not a guarantee for this exact
-    node/CPU stepping. See the env README's "Известные ограничения".
+    -cpu is a *named* model (Skylake-Client-v4), not `host` passthrough,
+    following LongQT-sea/OpenCore-ISO's explicit current guidance: `host`
+    is measurably slower under macOS (~30-44%, their own benchmark link)
+    and is exactly what that project exists to avoid. Skylake-Client-v4 (no
+    AVX-512) matches this node's real Haswell ceiling -- do NOT switch to
+    the AVX-512 Skylake-Server-v4 variant they also document, the physical
+    CPU doesn't have it and KVM can't fake an instruction set that isn't
+    silicon. -device virtio-tablet (not usb-tablet) works around a
+    documented macOS-26-specific cursor-freeze bug in the same guide.
+
+    Sourced from LongQT-sea/OpenCore-ISO's README (actively maintained,
+    explicitly covers Tahoe) -- more authoritative for this exact stack
+    than the generic hackintosh guides this string was first drafted from.
+    See the env README's "Известные ограничения" / "Что реально сработало".
   EOT
   type        = string
-  default     = "-device isa-applesmc,osk=ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc -smbios type=2 -device qemu-xhci -device usb-kbd -device usb-tablet -global nec-usb-xhci.msi=off -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off -cpu host,vendor=GenuineIntel,+invtsc,+hypervisor,kvm=on,vmware-cpuid-freq=on"
+  default     = "-device isa-applesmc,osk=ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc -smbios type=2 -device qemu-xhci -device usb-kbd -device virtio-tablet -global nec-usb-xhci.msi=off -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off -cpu Skylake-Client-v4,vendor=GenuineIntel"
 }
 
 variable "efi_pre_enrolled_keys" {

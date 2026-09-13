@@ -14,9 +14,10 @@ module "macos_headless" {
   name      = var.vm_name
   node_name = var.proxmox_node
 
-  cores  = var.cores
-  memory = var.memory
-  mac    = var.mac
+  cores   = var.cores
+  sockets = var.sockets
+  memory  = var.memory
+  mac     = var.mac
 
   network_model = var.network_model
 

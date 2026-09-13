@@ -12,8 +12,9 @@ resource "proxmox_virtual_environment_vm" "this" {
   bios    = "ovmf"
 
   cpu {
-    cores = var.cores
-    type  = var.cpu_type
+    cores   = var.cores
+    sockets = var.sockets
+    type    = var.cpu_type
   }
 
   memory {

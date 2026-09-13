@@ -33,9 +33,14 @@ variable "vm_name" {
 }
 
 variable "cores" {
-  description = "pve-rog's i7-4700HQ has 8 threads total -- leave headroom for the host and other guests on the node."
+  description = "Cores per socket -- see mod/vm-headless.cores on why this isn't just \"6\". 2x3 sockets below = 6 total vCPUs, leaving 2 of pve-rog's 8 threads for the host and other guests."
   type        = number
-  default     = 6
+  default     = 2
+}
+
+variable "sockets" {
+  type    = number
+  default = 3
 }
 
 variable "memory" {
@@ -84,5 +89,5 @@ variable "mac" {
 
 variable "network_model" {
   type    = string
-  default = "vmxnet3"
+  default = "virtio"
 }
