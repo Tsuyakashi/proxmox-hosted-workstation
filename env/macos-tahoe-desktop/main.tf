@@ -47,6 +47,13 @@ module "macos_desktop" {
     {
       name        = "gtx950"
       primary_gpu = var.gpu_primary
+      # See variables.tf's gpu_rom_file docstring -- null (default) leaves
+      # rombar=1 against the card's own stock legacy-only VBIOS, same as
+      # env/windows/env/ubuntu. Unlike those two, macOS never sees the
+      # device at all in that mode (confirmed via ioreg's ACPI PCI tree,
+      # not just "no picture") -- set gpu_rom_file once a real UEFI-GOP
+      # dump for 10de:1402 is on the node.
+      rom_file = var.gpu_rom_file
     },
     { name = "usb-xhci" },
     { name = "usb-ehci1" },

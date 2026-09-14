@@ -82,3 +82,23 @@ variable "gpu_primary" {
   type        = bool
   default     = false
 }
+
+variable "gpu_rom_file" {
+  description = <<-EOT
+    Optional vBIOS filename under /usr/share/kvm/ on the node (mod/vm's
+    existing rom_file mechanism). Unlike env/windows/env/ubuntu, macOS's
+    IOPCIFamily does not itself reassign PCI BARs that firmware left
+    unassigned -- confirmed on real hardware: with this null (rombar=1,
+    stock legacy-only VBIOS), the card's BARs stay "not mapped" per QEMU's
+    own `info pci`, and it never appears anywhere in the guest's ACPI PCI
+    tree (`ioreg -p IODeviceTree`), not even as an unclaimed placeholder --
+    a categorically different failure than the already-documented "monitor
+    stays dark at OVMF, driver lights it up later" behavior that env/windows
+    and env/ubuntu see and tolerate fine on this exact card. A proper
+    UEFI-GOP vBIOS for 10de:1402 (rombar stays true, this is fed to OVMF
+    in place of the card's own ROM) is the fix path the root README already
+    called out before this env existed. null = current behavior, unchanged.
+  EOT
+  type        = string
+  default     = null
+}

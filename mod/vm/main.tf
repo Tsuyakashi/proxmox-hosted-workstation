@@ -117,7 +117,7 @@ resource "proxmox_virtual_environment_vm" "this" {
         ? proxmox_hardware_mapping_pci.this[hostpci.value.name].name
       : hostpci.value.name)
       pcie     = true
-      rombar   = true
+      rombar   = hostpci.value.rombar
       xvga     = hostpci.value.primary_gpu
       rom_file = hostpci.value.rom_file
     }
