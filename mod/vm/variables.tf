@@ -81,6 +81,24 @@ variable "iso_file_id" {
   default     = null
 }
 
+variable "installer_interface" {
+  description = "Interface for the optional one-time installer_image_file_id disk. Must not collide with disk_interface / cdrom_interface."
+  type        = string
+  default     = "sata1"
+}
+
+variable "installer_image_file_id" {
+  description = <<-EOT
+    Volume ID of a raw disk image to import as a one-time install source
+    (e.g. a macOS recovery/BaseSystem image, `datastore:import/filename`).
+    null (default, and what env/windows always uses) omits this disk
+    entirely. Imported once at create time, not a live mount -- unset and
+    re-apply to detach once the guest OS is actually installed.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "network_bridge" {
   type    = string
   default = "vmbr0"
