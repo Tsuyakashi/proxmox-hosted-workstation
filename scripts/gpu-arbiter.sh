@@ -5,35 +5,47 @@ set -uo pipefail
 # gpu-arbiter.sh — Proxmox guest hookscript + GPU/USB driver-swap engine
 # ============================================================
 #
-# bare-pve has ONE discrete GPU + one set of USB controllers, shared by two
+# bare-pve has ONE discrete GPU + one set of USB controllers, shared by THREE
 # MUTUALLY-EXCLUSIVE guests:
 #
 #   windows -> PCI-passthrough VM   GPU + USB functions on vfio-pci
+#   macos   -> PCI-passthrough VM   GPU + USB functions on vfio-pci (same mode
+#                                   as windows -- both are vfio guests; host_mode()
+#                                   can't tell them apart from the PCI driver
+#                                   alone, only cmd_status()'s display does, by
+#                                   also checking which one is actually running)
 #   ubuntu  -> LXC container        GPU on nvidia, USB on native drivers
 #                                   (/dev subtrees shared into the CT)
 #
 # This script is the single implementation of the switch + the "one OS at a
 # time" lock. It is used two ways:
 #
-#   1. As a Proxmox hookscript on BOTH guests (native mechanism):
+#   1. As a Proxmox hookscript on ALL THREE guests (native mechanism):
 #        qm  set <winid> --hookscript local:snippets/gpu-arbiter.sh
+#        qm  set <macid> --hookscript local:snippets/gpu-arbiter.sh
 #        pct set <ctid>  --hookscript local:snippets/gpu-arbiter.sh
 #      Proxmox calls it as `<vmid> <phase>`. On `pre-start` it takes a lock,
-#      refuses (exit 1 -> Proxmox ABORTS the start) if the other guest is
+#      refuses (exit 1 -> Proxmox ABORTS the start) if either other guest is
 #      running, and live-rebinds the GPU/USB to this guest's mode if needed.
 #      Any start path — `qm start`, `pct start`, the web-UI Start button, the
 #      API, a routine — triggers it. Other phases are no-ops (stopping one
-#      guest never starts the other; both-off is a valid resting state).
+#      guest never starts another; all-off is a valid resting state). A qemu
+#      VM's identity (windows vs macos) is resolved by matching its `name:`
+#      against WIN_NAME/MACOS_NAME (see vm_role()), not just "it's a VM" --
+#      an unrecognized VM name is ignored (returns 0, normal Proxmox start),
+#      never guessed at.
 #
 #   2. As a CLI (also used by scripts/workstation.sh):
-#        gpu-arbiter.sh switch windows|ubuntu   # rebind only, both guests must be off
-#        gpu-arbiter.sh status                  # host mode, guests, PCI drivers
+#        gpu-arbiter.sh switch windows|macos|ubuntu   # rebind only, all guests off
+#        gpu-arbiter.sh status                        # host mode, guests, PCI drivers
 #
 # Runs as root on the Proxmox host. Logs to /var/log/gpu-arbiter.log.
-# Override discovery via env: WIN_NAME, CT_NAME, GPU_VGA, GPU_AUD, USB_FUNCS.
+# Override discovery via env: WIN_NAME, MACOS_NAME, CT_NAME, GPU_VGA, GPU_AUD,
+# USB_FUNCS.
 
 # ---- site config -----------------------------------------------------------
 WIN_NAME="${WIN_NAME:-windows-workstation}"
+MACOS_NAME="${MACOS_NAME:-macos-monterey-workstation}"
 CT_NAME="${CT_NAME:-ubuntu-workstation}"
 
 GPU_VGA="${GPU_VGA:-0000:01:00.0}"
@@ -58,11 +70,28 @@ take_lock() {
 }
 
 # ---- discovery ----------------------------------------------------------
-win_vmid() { grep -sl "^name: ${WIN_NAME}\$"    /etc/pve/qemu-server/*.conf 2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
-ct_vmid()  { grep -sl "^hostname: ${CT_NAME}\$" /etc/pve/lxc/*.conf         2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
+win_vmid()   { grep -sl "^name: ${WIN_NAME}\$"    /etc/pve/qemu-server/*.conf 2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
+macos_vmid() { grep -sl "^name: ${MACOS_NAME}\$"  /etc/pve/qemu-server/*.conf 2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
+ct_vmid()    { grep -sl "^hostname: ${CT_NAME}\$" /etc/pve/lxc/*.conf         2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
 
 vm_running() { [ -n "${1:-}" ] && qm  status "$1" 2>/dev/null | grep -q running; }
 ct_running() { [ -n "${1:-}" ] && pct status "$1" 2>/dev/null | grep -q running; }
+
+vm_role() { # $1 = a qemu-server vmid -> windows|macos|unknown, by name match
+  local vmid=$1
+  [ "$vmid" = "$(win_vmid)" ]   && { echo windows; return; }
+  [ "$vmid" = "$(macos_vmid)" ] && { echo macos; return; }
+  echo unknown
+}
+
+other_guest_running() { # $1 = me (windows|macos|ubuntu). Prints "<name> <id>"
+  local me=$1 win ct mac                        # and returns 0 if some OTHER
+  win=$(win_vmid); ct=$(ct_vmid); mac=$(macos_vmid)  # guest is running.
+  if [ "$me" != windows ] && vm_running "$win"; then echo "windows $win"; return 0; fi
+  if [ "$me" != macos ]   && vm_running "$mac"; then echo "macos $mac";   return 0; fi
+  if [ "$me" != ubuntu ]  && ct_running "$ct";  then echo "ubuntu $ct";   return 0; fi
+  return 1
+}
 
 cur_driver() { # $1 = 0000:BB:DD.F
   local l="/sys/bus/pci/devices/$1/driver"
@@ -118,6 +147,14 @@ switch_to_windows() {
   done
   [ "$(cur_driver "$GPU_VGA")" = vfio-pci ] || rc=1
   return $rc
+}
+
+switch_to_macos() {
+  # Identical PCI targets/driver to switch_to_windows -- macOS (OpenCore,
+  # vfio-pci passthrough) shares the exact same host-side vfio binding as
+  # the Windows VM. Kept as its own named function (not a bare alias) so
+  # do_switch()'s dispatch stays one symmetrical case per guest.
+  switch_to_windows
 }
 
 switch_to_ubuntu() {
@@ -211,7 +248,11 @@ do_switch() { # $1 target  — live rebind only, no guest-running guard (caller'
   [ "$from" = "$target" ] && log "host GPU already $target — verifying USB/audio" \
                           || log "swapping host $from -> $target (live PCI rebind)"
   local rc=0
-  if [ "$target" = windows ]; then switch_to_windows || rc=$?; else switch_to_ubuntu || rc=$?; fi
+  case "$target" in
+    windows) switch_to_windows || rc=$? ;;
+    macos)   switch_to_macos   || rc=$? ;;
+    ubuntu)  switch_to_ubuntu  || rc=$? ;;
+  esac
   if [ "$rc" -ne 0 ]; then
     log "live rebind to $target FAILED — a device is still held (guest not fully stopped,"
     log "nvidia-persistenced, or an Xorg on the host). Recover with:"
@@ -223,21 +264,27 @@ do_switch() { # $1 target  — live rebind only, no guest-running guard (caller'
 
 # ---- Proxmox hook: pre-start ------------------------------------------
 hook_prestart() { # $1 = vmid
-  local vmid=$1 me target other other_id
-  if   [ -f "/etc/pve/qemu-server/${vmid}.conf" ]; then me=windows
-  elif [ -f "/etc/pve/lxc/${vmid}.conf" ];         then me=ubuntu
-  else log "pre-start for $vmid: not a known guest type, ignoring"; return 0
+  local vmid=$1 me target
+  if [ -f "/etc/pve/qemu-server/${vmid}.conf" ]; then
+    me=$(vm_role "$vmid")
+    if [ "$me" = unknown ]; then
+      log "pre-start for $vmid: qemu VM name matches neither WIN_NAME ($WIN_NAME)"
+      log "  nor MACOS_NAME ($MACOS_NAME), ignoring (not an arbiter-managed guest)"
+      return 0
+    fi
+  elif [ -f "/etc/pve/lxc/${vmid}.conf" ]; then
+    me=ubuntu
+  else
+    log "pre-start for $vmid: not a known guest type, ignoring"; return 0
   fi
   target=$me
 
   take_lock
   log "pre-start: vmid=$vmid ($me), host currently in $(host_mode) mode"
 
-  if [ "$me" = windows ]; then other=ubuntu;  other_id=$(ct_vmid)
-  else                         other=windows; other_id=$(win_vmid)
-  fi
-  if { [ "$other" = windows ] && vm_running "$other_id"; } || \
-     { [ "$other" = ubuntu ]  && ct_running "$other_id"; }; then
+  local info
+  if info=$(other_guest_running "$me"); then
+    local other=${info%% *} other_id=${info##* }
     log "REFUSING to start $vmid: the $other guest ($other_id) is running."
     log "Stop it first:  scripts/workstation.sh stop $other   (or: start $me --force)"
     exit 1
@@ -249,9 +296,17 @@ hook_prestart() { # $1 = vmid
 
 # ---- CLI: status -----------------------------------------------------
 cmd_status() {
-  local win ct; win=$(win_vmid); ct=$(ct_vmid)
-  echo "host mode      : $(host_mode)   (GPU $GPU_VGA driver: $(cur_driver "$GPU_VGA"))"
+  local win ct mac; win=$(win_vmid); ct=$(ct_vmid); mac=$(macos_vmid)
+  local mode; mode=$(host_mode)
+  # host_mode() only sees the PCI driver (vfio-pci -> "windows") -- it can't
+  # tell macOS apart from Windows at that level, both are vfio passthrough.
+  # Disambiguate the display only, never the actual routing/behavior: when
+  # there's no macos guest (mac empty) or it isn't running, this is a no-op
+  # and the line is byte-identical to the pre-3-way output.
+  [ "$mode" = windows ] && vm_running "$mac" && mode=macos
+  echo "host mode      : $mode   (GPU $GPU_VGA driver: $(cur_driver "$GPU_VGA"))"
   echo "windows VM     : id=${win:-not-created}  $(vm_running "$win" && echo RUNNING || echo stopped)"
+  echo "macos   VM     : id=${mac:-not-created}  $(vm_running "$mac" && echo RUNNING || echo stopped)"
   echo "ubuntu  CT     : id=${ct:-not-created}  $(ct_running "$ct" && echo RUNNING || echo stopped)"
   echo
   echo "PCI function -> driver:"
@@ -262,12 +317,13 @@ cmd_status() {
 }
 
 # ---- CLI: switch ---------------------------------------------------
-cmd_switch() { # $1 = windows|ubuntu
+cmd_switch() { # $1 = windows|macos|ubuntu
   local target=${1:-}
-  [ "$target" = windows ] || [ "$target" = ubuntu ] || die "switch <windows|ubuntu>"
+  case "$target" in windows|macos|ubuntu) ;; *) die "switch <windows|macos|ubuntu>" ;; esac
   take_lock
-  local win ct; win=$(win_vmid); ct=$(ct_vmid)
+  local win ct mac; win=$(win_vmid); ct=$(ct_vmid); mac=$(macos_vmid)
   vm_running "$win" && die "windows VM is running — stop it before switching"
+  vm_running "$mac" && die "macos VM is running — stop it before switching"
   ct_running "$ct"  && die "ubuntu CT is running — stop it before switching"
   do_switch "$target"
 }
@@ -284,10 +340,10 @@ case "${2:-}" in
       *) cat >&2 <<EOF
 gpu-arbiter.sh — Proxmox GPU/USB arbiter
 
-As a hookscript (attached to both guests):  gpu-arbiter.sh <vmid> <phase>
+As a hookscript (attached to all three guests):  gpu-arbiter.sh <vmid> <phase>
 As a CLI:
-  gpu-arbiter.sh switch <windows|ubuntu>   rebind GPU/USB (both guests must be off)
-  gpu-arbiter.sh status                    show host mode, guests, PCI drivers
+  gpu-arbiter.sh switch <windows|macos|ubuntu>   rebind GPU/USB (all guests must be off)
+  gpu-arbiter.sh status                          show host mode, guests, PCI drivers
 EOF
          exit 1 ;;
     esac ;;

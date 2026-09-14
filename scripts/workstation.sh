@@ -6,20 +6,21 @@ set -uo pipefail
 # ============================================================
 #
 # The switch + lock ENGINE lives in scripts/gpu-arbiter.sh (also wired as a
-# Proxmox hookscript on both guests, so `qm start` / `pct start` / the web-UI
-# Start button already do the right thing on their own).
+# Proxmox hookscript on all three guests, so `qm start` / `pct start` / the
+# web-UI Start button already do the right thing on their own).
 #
 # This wrapper adds the conveniences a hookscript can't:
 #   status                       -> gpu-arbiter.sh status
-#   start <g> [--force]          force = shut the OTHER guest down first
+#   start <g> [--force]          force = shut the OTHER guest(s) down first
 #   start <g> --via-reboot       stage the switch + reboot, resume after boot
 #   stop  [g]                    shut guest(s) down, start nothing
 #   switch <g> [--via-reboot]    swap drivers only
 #
-# Both guests default OFF (on_boot=false / start_on_boot=false). Stopping one
-# never starts the other. Run as root on the Proxmox host.
+# All three guests default OFF (on_boot=false / start_on_boot=false). Stopping
+# one never starts another. Run as root on the Proxmox host.
 
 WIN_NAME="${WIN_NAME:-windows-workstation}"
+MACOS_NAME="${MACOS_NAME:-macos-monterey-workstation}"
 CT_NAME="${CT_NAME:-ubuntu-workstation}"
 STATE_DIR=/var/lib/workstation
 LOCK_FILE=/run/lock/gpu-arbiter.lock
@@ -43,16 +44,27 @@ drop_lock() { exec 9>&- 2>/dev/null || true; }   # MUST release before qm/pct st
                                                  # the Proxmox-spawned pre-start hook
                                                  # takes this same lock in its own process
 
-win_vmid() { grep -sl "^name: ${WIN_NAME}\$"    /etc/pve/qemu-server/*.conf 2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
-ct_vmid()  { grep -sl "^hostname: ${CT_NAME}\$" /etc/pve/lxc/*.conf         2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
+win_vmid()   { grep -sl "^name: ${WIN_NAME}\$"    /etc/pve/qemu-server/*.conf 2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
+macos_vmid() { grep -sl "^name: ${MACOS_NAME}\$"  /etc/pve/qemu-server/*.conf 2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
+ct_vmid()    { grep -sl "^hostname: ${CT_NAME}\$" /etc/pve/lxc/*.conf         2>/dev/null | head -n1 | xargs -r basename | sed 's/\.conf$//'; }
 vm_running() { [ -n "${1:-}" ] && qm  status "$1" 2>/dev/null | grep -q running; }
 ct_running() { [ -n "${1:-}" ] && pct status "$1" 2>/dev/null | grep -q running; }
 host_mode() { _GPU_ARBITER_LOCKED=1 "$ARBITER" status 2>/dev/null | awk '/^host mode/ {print $4; exit}'; }
 
-stop_guest() { # $1 = windows|ubuntu
-  local win ct; win=$(win_vmid); ct=$(ct_vmid)
+target_running() { # $1 = windows|macos|ubuntu
+  case "$1" in
+    windows) vm_running "$(win_vmid)" ;;
+    macos)   vm_running "$(macos_vmid)" ;;
+    ubuntu)  ct_running "$(ct_vmid)" ;;
+  esac
+}
+
+stop_guest() { # $1 = windows|macos|ubuntu
+  local win ct mac; win=$(win_vmid); ct=$(ct_vmid); mac=$(macos_vmid)
   if [ "$1" = windows ] && vm_running "$win"; then
     info "shutting down windows VM $win"; qm shutdown "$win" --timeout 120 || qm stop "$win"
+  elif [ "$1" = macos ] && vm_running "$mac"; then
+    info "shutting down macos VM $mac"; qm shutdown "$mac" --timeout 120 || qm stop "$mac"
   elif [ "$1" = ubuntu ] && ct_running "$ct"; then
     info "shutting down ubuntu CT $ct"; pct shutdown "$ct" --timeout 120 || pct stop "$ct"
   fi
@@ -72,22 +84,24 @@ cmd_start() { # $1 target  [$2 --force|--via-reboot]
   local target=${1:-} force=0 via=0
   case "${2:-}" in
     --force) force=1 ;; --via-reboot) via=1 ;; "") ;;
-    *) die "start <windows|ubuntu> [--force|--via-reboot]" ;;
+    *) die "start <windows|macos|ubuntu> [--force|--via-reboot]" ;;
   esac
-  [ "$target" = windows ] || [ "$target" = ubuntu ] || die "start <windows|ubuntu> [--force|--via-reboot]"
+  case "$target" in windows|macos|ubuntu) ;; *) die "start <windows|macos|ubuntu> [--force|--via-reboot]" ;; esac
 
   take_lock
-  local win ct; win=$(win_vmid); ct=$(ct_vmid)
-  local other; [ "$target" = windows ] && other=ubuntu || other=windows
 
-  if { [ "$target" = windows ] && vm_running "$win"; } || { [ "$target" = ubuntu ] && ct_running "$ct"; }; then
+  if target_running "$target"; then
     info "$target already running"; return 0
   fi
 
-  if { [ "$other" = windows ] && vm_running "$win"; } || { [ "$other" = ubuntu ] && ct_running "$ct"; }; then
-    [ "$force" = 1 ] || die "$other is running. Stop it first:  $0 stop $other   (or pass --force)"
-    info "--force: stopping $other first"; stop_guest "$other"
-  fi
+  local other
+  for other in windows macos ubuntu; do
+    [ "$other" = "$target" ] && continue
+    if target_running "$other"; then
+      [ "$force" = 1 ] || die "$other is running. Stop it first:  $0 stop $other   (or pass --force)"
+      info "--force: stopping $other first"; stop_guest "$other"
+    fi
+  done
 
   do_switch "$target" "$via" || die "cannot give the hardware to $target (try: $0 switch $target --via-reboot)"
 
@@ -96,29 +110,42 @@ cmd_start() { # $1 target  [$2 --force|--via-reboot]
   # here would deadlock it for flock's 300s timeout.
   drop_lock
 
-  if [ "$target" = windows ]; then
-    [ -n "$win" ] || die "no VM named '$WIN_NAME'"
-    info "qm start $win"; qm start "$win"
-  else
-    [ -n "$ct" ] || die "no CT named '$CT_NAME' — run terraform -chdir=env/ubuntu apply"
-    info "pct start $ct"; pct start "$ct"
-  fi
+  case "$target" in
+    windows)
+      local win; win=$(win_vmid)
+      [ -n "$win" ] || die "no VM named '$WIN_NAME'"
+      info "qm start $win"; qm start "$win"
+      ;;
+    macos)
+      local mac; mac=$(macos_vmid)
+      [ -n "$mac" ] || die "no VM named '$MACOS_NAME' — run terraform -chdir=env/macos-monterey apply"
+      info "qm start $mac"; qm start "$mac"
+      ;;
+    ubuntu)
+      local ct; ct=$(ct_vmid)
+      [ -n "$ct" ] || die "no CT named '$CT_NAME' — run terraform -chdir=env/ubuntu apply"
+      info "pct start $ct"; pct start "$ct"
+      ;;
+  esac
   info "$target is up (host mode: $(host_mode))"
 }
 
 cmd_stop() {
-  local which=${1:-both}
-  case "$which" in windows|ubuntu|both) ;; *) die "stop [windows|ubuntu]" ;; esac
+  local which=${1:-all}
+  case "$which" in windows|macos|ubuntu|all|both) ;; *) die "stop [windows|macos|ubuntu]" ;; esac
   take_lock
-  [ "$which" != ubuntu ]  && stop_guest windows
-  [ "$which" != windows ] && stop_guest ubuntu
+  if [ "$which" = all ] || [ "$which" = both ]; then
+    stop_guest windows; stop_guest macos; stop_guest ubuntu
+  else
+    stop_guest "$which"
+  fi
   info "stopped. Host stays in $(host_mode) mode — nothing else started."
 }
 
 cmd_switch() { # $1 target  [$2 --via-reboot]
   local target=${1:-} via=0
   [ "${2:-}" = "--via-reboot" ] && via=1
-  [ "$target" = windows ] || [ "$target" = ubuntu ] || die "switch <windows|ubuntu> [--via-reboot]"
+  case "$target" in windows|macos|ubuntu) ;; *) die "switch <windows|macos|ubuntu> [--via-reboot]" ;; esac
   take_lock
   do_switch "$target" "$via"
 }
@@ -141,9 +168,9 @@ case "${1:-}" in
 usage: $0 <command>
 
   status                         host mode, guests, PCI driver bindings
-  start  <windows|ubuntu> [--force|--via-reboot]
-  stop   [windows|ubuntu]        shut guest(s) down; start nothing
-  switch <windows|ubuntu> [--via-reboot]   swap drivers only (guests must be off)
+  start  <windows|macos|ubuntu> [--force|--via-reboot]
+  stop   [windows|macos|ubuntu]  shut guest(s) down; start nothing (default: all)
+  switch <windows|macos|ubuntu> [--via-reboot]   swap drivers only (guests must be off)
   resume                         finish a --via-reboot switch (systemd unit)
 
 The switch also happens automatically on \`qm start\` / \`pct start\` / web-UI Start
