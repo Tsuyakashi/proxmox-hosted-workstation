@@ -45,7 +45,7 @@ set -uo pipefail
 
 # ---- site config -----------------------------------------------------------
 WIN_NAME="${WIN_NAME:-windows-workstation}"
-MACOS_NAME="${MACOS_NAME:-macos-monterey-workstation}"
+MACOS_NAME="${MACOS_NAME:-macos-workstation}"
 CT_NAME="${CT_NAME:-ubuntu-workstation}"
 
 GPU_VGA="${GPU_VGA:-0000:01:00.0}"

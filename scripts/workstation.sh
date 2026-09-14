@@ -20,7 +20,7 @@ set -uo pipefail
 # one never starts another. Run as root on the Proxmox host.
 
 WIN_NAME="${WIN_NAME:-windows-workstation}"
-MACOS_NAME="${MACOS_NAME:-macos-monterey-workstation}"
+MACOS_NAME="${MACOS_NAME:-macos-workstation}"
 CT_NAME="${CT_NAME:-ubuntu-workstation}"
 STATE_DIR=/var/lib/workstation
 LOCK_FILE=/run/lock/gpu-arbiter.lock
@@ -118,7 +118,7 @@ cmd_start() { # $1 target  [$2 --force|--via-reboot]
       ;;
     macos)
       local mac; mac=$(macos_vmid)
-      [ -n "$mac" ] || die "no VM named '$MACOS_NAME' — run terraform -chdir=env/macos-monterey apply"
+      [ -n "$mac" ] || die "no VM named '$MACOS_NAME' — run terraform -chdir=env/macos-tahoe-desktop apply"
       info "qm start $mac"; qm start "$mac"
       ;;
     ubuntu)
