@@ -37,6 +37,16 @@ resource "proxmox_virtual_environment_vm" "this" {
   node_name = var.node_name
   on_boot   = var.on_boot
 
+  # Every guest here is externally lifecycle-managed (workstation.sh / the
+  # arbiter's hookscript) -- never auto-start on create. Matters most for a
+  # GPU-passthrough guest: on a first create the host GPU driver may not
+  # even be on vfio-pci yet (host previously in ubuntu/nvidia mode), so an
+  # auto-start attempt fails outright ("Cannot bind ... to vfio ... No such
+  # device") rather than just being merely premature. `started` is also in
+  # this resource's ignore_changes below, so later runtime start/stop
+  # cycles are never fought by a plan.
+  started = false
+
   machine = "q35"
   bios    = "ovmf"
 
