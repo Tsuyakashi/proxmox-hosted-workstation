@@ -113,7 +113,8 @@ fi
 
 # ------------------------------------------------------------
 # 4. Raw lxc.* — things dev[n] can't express:
-#    - USB / input / sound *directories* (bind + cgroup major ranges)
+#    - USB / input / sound *directories* + webcam video4linux nodes (bind +
+#      cgroup major ranges)
 #    - the physical seat: framebuffer + tty7 so an Xorg inside the CT can
 #      become DRM-master and light the monitors. NEVER bind /dev/console,
 #      /dev/tty0, or the getty ttys (tty1/tty2) — LXC / Proxmox own those and
@@ -176,6 +177,18 @@ lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/fb0 dev/fb0 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/vga_arbiter dev/vga_arbiter none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/uinput dev/uinput none bind,optional,create=file 0 0
+# video4linux (81): USB webcams (UVC) show up as /dev/videoN alongside their
+# already-passed-through USB-audio interface (via /dev/bus/usb + /dev/snd) --
+# the mic works without this, the camera does not: uvcvideo creates separate
+# char devices the CT never saw. /dev itself can't be bind-mounted wholesale
+# (unlike /dev/input, /dev/snd, /dev/bus/usb, which live in their own dirs),
+# so bind a handful of indices individually -- 0-3 covers the current webcam
+# (video0 capture + video1 metadata) with headroom for one more device.
+lxc.cgroup2.devices.allow: c 81:* rwm
+lxc.mount.entry: /dev/video0 dev/video0 none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/video1 dev/video1 none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/video2 dev/video2 none bind,optional,create=file 0 0
+lxc.mount.entry: /dev/video3 dev/video3 none bind,optional,create=file 0 0
 # Only tty7 for the seat Xorg (runs -keeptty -novtswitch). NEVER bind
 # /dev/console, /dev/tty0, or the getty ttys tty1/tty2 (Proxmox tty: 2) --
 # binding those fails the container at spawn (sync_wait: 34).
