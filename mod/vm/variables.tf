@@ -81,6 +81,24 @@ variable "iso_file_id" {
   default     = null
 }
 
+variable "installer_interface" {
+  description = "Interface for the optional one-time installer_image_file_id disk. Must not collide with disk_interface / cdrom_interface."
+  type        = string
+  default     = "sata1"
+}
+
+variable "installer_image_file_id" {
+  description = <<-EOT
+    Volume ID of a raw disk image to import as a one-time install source
+    (e.g. a macOS recovery/BaseSystem image, `datastore:import/filename`).
+    null (default, and what env/windows always uses) omits this disk
+    entirely. Imported once at create time, not a live mount -- unset and
+    re-apply to detach once the guest OS is actually installed.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "network_bridge" {
   type    = string
   default = "vmbr0"
@@ -122,6 +140,14 @@ variable "passthrough" {
       rom_file     - optional vBIOS file under /usr/share/kvm/ on the node; set this
                      if the monitor stays dark at the OVMF screen (primary-card ROM
                      shadowed by host POST)
+      rombar       - default true (matches prior hardcoded behavior). Set false to
+                     stop the guest firmware from executing the card's own option
+                     ROM at all. Tried as a fix for a real-hardware case where a
+                     passed-through GPU never appeared in the guest OS at all (not
+                     just "no picture") -- turned out not to be the cause there
+                     (see env/macos-tahoe-desktop's README), but kept as a real,
+                     independently useful toggle for whatever OPROM-execution
+                     issues it IS the right fix for.
   EOT
   type = list(object({
     name         = string
@@ -131,6 +157,7 @@ variable "passthrough" {
     iommu_group  = optional(number)
     primary_gpu  = optional(bool, false)
     rom_file     = optional(string)
+    rombar       = optional(bool, true)
   }))
   default = []
 

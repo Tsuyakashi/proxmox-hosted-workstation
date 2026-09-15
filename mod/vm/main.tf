@@ -37,6 +37,16 @@ resource "proxmox_virtual_environment_vm" "this" {
   node_name = var.node_name
   on_boot   = var.on_boot
 
+  # Every guest here is externally lifecycle-managed (workstation.sh / the
+  # arbiter's hookscript) -- never auto-start on create. Matters most for a
+  # GPU-passthrough guest: on a first create the host GPU driver may not
+  # even be on vfio-pci yet (host previously in ubuntu/nvidia mode), so an
+  # auto-start attempt fails outright ("Cannot bind ... to vfio ... No such
+  # device") rather than just being merely premature. `started` is also in
+  # this resource's ignore_changes below, so later runtime start/stop
+  # cycles are never fought by a plan.
+  started = false
+
   machine = "q35"
   bios    = "ovmf"
 
@@ -66,6 +76,22 @@ resource "proxmox_virtual_environment_vm" "this" {
     file_format  = "raw"
   }
 
+  # Optional second removable-media disk for a one-time install source (e.g.
+  # a macOS recovery/BaseSystem image) that isn't the primary `cdrom` slot --
+  # that one is reserved for the OS installer ISO (Windows) or the OpenCore
+  # boot loader (macOS, attached every boot, not just install). Nullable /
+  # additive: env/windows never sets installer_image_file_id, so this block
+  # emits nothing and its plan is unaffected.
+  dynamic "disk" {
+    for_each = var.installer_image_file_id != null ? [var.installer_image_file_id] : []
+    content {
+      datastore_id = var.datastore_id_disk
+      interface    = var.installer_interface
+      import_from  = disk.value
+      file_format  = "raw"
+    }
+  }
+
   cdrom {
     file_id   = coalesce(var.iso_file_id, "none")
     interface = var.cdrom_interface
@@ -91,7 +117,7 @@ resource "proxmox_virtual_environment_vm" "this" {
         ? proxmox_hardware_mapping_pci.this[hostpci.value.name].name
       : hostpci.value.name)
       pcie     = true
-      rombar   = true
+      rombar   = hostpci.value.rombar
       xvga     = hostpci.value.primary_gpu
       rom_file = hostpci.value.rom_file
     }
@@ -111,5 +137,20 @@ resource "proxmox_virtual_environment_vm" "this" {
 
   operating_system {
     type = var.os_type
+  }
+
+  lifecycle {
+    # hook_script_file_id: root@pam-only (`qm set --hookscript` on the node,
+    #   see root README "Установка (разово на ноду)") -- this resource never
+    #   sets it, so without this the provider's own schema default (null)
+    #   fights whatever a node-side `qm set` actually put there and a stray
+    #   `terraform apply` would silently rip the arbiter hookscript back off.
+    #   Confirmed on real state (env/windows, 2026-09-14): a plain `plan`
+    #   against the live windows VM showed exactly this diff before the fix.
+    # started: the arbiter / workstation.sh own run state after the first
+    #   create, same as mod/ct's own `started` -- the provider's schema
+    #   default (true) otherwise drifts against a guest that's meant to be
+    #   off, and a stray apply would actually power it on.
+    ignore_changes = [hook_script_file_id, started]
   }
 }
