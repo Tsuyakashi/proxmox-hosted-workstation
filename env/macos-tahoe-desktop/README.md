@@ -505,3 +505,176 @@ gpu_rom_file=<файл>`). Все протестированные файлы о
 `gtx950.rom` (референсный NVIDIA), `gtx950-combined.rom` (склейка с
 референсным EFI), `gtx950-fit128.rom` (склейка с MSI EFI, помещается в
 128 КБ), `gtx950-msi.rom`, `gtx950-asus.rom` (не тестировался).
+
+## High Sierra: NVIDIA Web Driver установлен, но новый hang глубже в стеке (2026-09-15)
+
+Продолжение плана из раздела "ПРОРЫВ" выше (переход на High Sierra 10.13.6
+ради официального NVIDIA Web Driver для Maxwell). Итог: **дошли до
+загрузки правильного kext'а на правильном железе — и упёрлись в
+следующий, более глубокий hang, уже не GOP/BAR, а сам kernel-level
+hardware-handshake драйвера.**
+
+### Установочный пайплайн (с нуля, воспроизводимо, пройден дважды)
+
+`fetch-macOS-v2.py` (OSX-KVM) тянет только Recovery `BaseSystem.dmg`
+(~486 МБ) — не годится для полноценной установки. Рабочий путь:
+
+1. `gibMacOS` (corpnewt/gibMacOS) → тянет полный `InstallESDDmg.pkg`
+   (~4.7 ГБ) напрямую с каталога Apple.
+2. `xar` (Debian-пакет) **падает Segmentation fault** на этом файле
+   (реальный баг libxar на больших архивах, не ENOSPC — проверено переносом
+   с tmpfs на настоящий диск). Фикс: `p7zip-full`, `7z x` — извлекает
+   `InstallESD.dmg` (4 721 938 282 байт) чисто.
+3. Recovery-том **read-only** — стаб `/Install macOS High Sierra.app` там
+   без `Contents/SharedSupport/InstallESD.dmg`. Рабочий приём: `cp -R` стаба
+   на записываемый целевой том, `mkdir -p .../Contents/SharedSupport`, затем
+   `dd if=/dev/diskN of=.../InstallESD.dmg bs=4m`, где `diskN` — сырой
+   импортированный ESD-диск (Proxmox raw-import сохраняет побайтовую
+   структуру, поэтому `dd` всего диска восстанавливает исходный `.dmg`
+   один в один). ~17 минут на прогон.
+4. **`startosinstall` (CLI) в этом Recovery окружении фундаментально
+   сломан** (`Couldn't communicate with a helper application` / "Helper
+   tool crashed" — воспроизведено многократно, не зависит от сети).
+   Рабочая замена: `InstallAssistant_springboard` (тот же
+   `Contents/MacOS/` записываемой копии) — настоящий GUI-инсталлятор,
+   единственный надёжный путь.
+5. Диск обязательно **`diskutil eraseDisk JHFS+ "Macintosh HD" disk0`**
+   (HFS+/Mac OS Extended Journaled), НЕ APFS — инсталлятор сам решает
+   конвертировать в APFS по признаку SSD, наш виртуальный диск не
+   флагован как SSD → `"Target is not convertible to APFS"` при попытке
+   APFS.
+
+### Сеть в Recovery/гостевой ОС: только `vmxnet3`
+
+`virtio` — нет kext'а под High Sierra. `e1000`/`e1000e` — **оба** давали
+полностью пустой `ifconfig -a` (нет `en0`) уже в Recovery, даже с
+`IntelMausiEthernet.kext`, инжектированным через OpenCore — не
+диагностировано до конца (похоже, у урезанного Recovery kernel collection
+нет вообще никаких generic-PC NIC kext'ов). **`vmxnet3`
+(AppleVMXNet3Ethernet.kext, встроен в любую macOS, включая урезанный
+Recovery) — единственный вариант, который реально работает**, и в
+Recovery, и в полной ОС. `env/macos-tahoe-desktop/main.tf`'s
+`network_model` теперь постоянно `"vmxnet3"`.
+
+### Апдейт до точной сборки 17G14042 — единственной с матчащимся драйвером
+
+NVIDIA Web Driver `.pkg`-инсталлятор жёстко проверяет точную сборку
+(`Mac OS X version 10.13.6 (17G14042) is required for this update`).
+Свежая установка даёт **17G2208** (supplemental-апдейт "для MacBook Pro
+2018", без матчащего драйвера вообще). Путь: `Security Update
+2020-005-10.13.6` → 17G14033 → `Security Update 2020-006-10.13.6` →
+17G14042.
+
+Ключевые грабли:
+
+- **`installer -pkg <combo>.pkg -target /` молча no-op'ает настоящий
+  payload**, репортуя `"The upgrade was successful"` (ложный успех).
+  `/var/log/install.log`: `"Skipping ClientOS package because it's a
+  system image: com.apple.pkg.SecUpd2020-005HighSierra.RecoveryHDUpdate..."`.
+  Фикс: **только** `softwareupdate -i '<точное имя апдейта>'` — гонит
+  правильный staged-install + finalize-on-reboot механизм.
+- `softwareupdate` нуждается в HTTP (не HTTPS) каталоге: Apple's HTTPS
+  catalog-серверы отбрасывают старые macOS-клиенты (реальная,
+  задокументированная server-side регрессия на 2026 год) —
+  `defaults write /Library/Preferences/com.apple.SoftwareUpdate CatalogURL
+  'http://swscan.apple.com/content/catalogs/others/index-10.13-...
+  .merged-1.sucatalog'`.
+- Двухфазный паттерн: `softwareupdate -i` быстро скачивает и стейджит
+  ("Done"), затем **обязательный** ребут в отдельную finalize-фазу
+  ("macOS Installer" в boot-меню, `Installing: N minutes remaining`,
+  10-15+ минут) — **прерывать нельзя**. Один `kill -9` зависшего QEMU
+  именно в этой фазе **скорраптил kernelcache** (после — "no entry" при
+  любой попытке загрузки); First Aid + `kextcache -update-volume` не
+  помогли, реально помогла только **полная чистая переустановка** (тот же
+  пайплайн выше, с нуля).
+
+### Ложная тревога: Booter Quirks регрессия (самоинфликтована)
+
+После установки апдейтов `Error loading kernel cache (0x9)` вернулась —
+но уже **и на Recovery тоже** (не связанной с апдейтом кэш), что доказало:
+причина не в апдейте, а в моих же спекулятивных правках `Booter → Quirks`
+в `config.plist` (`DevirtualiseMmio`, `RebuildAppleMemoryMap`,
+`SyncRuntimePermissions`, `EnableWriteUnprotector=False`, `slide=0`),
+сделанных по мотивам форумных советов про "VBIOS конкурирует с kernel за
+low memory". Откат всех Quirks к оригинальным дефолтам репозитория (плюс
+удаление `slide=0` из boot-args) **сразу вернул рабочую загрузку** и для
+Recovery, и для Macintosh HD. Заодно найден и удалён дубликат
+`VoodooPS2Controller`/`VoodooPS2Keyboard` kext-записей (одна штатная
+gated-копия + одна безусловная, добавленная мной ранее в сессии,
+одновременно грузились — вероятный источник нестабильности).
+
+### Драйвер встал на нужное железо — и всё равно hang
+
+С 17G14042 NVIDIA Web Driver (`WebDriver-387.10.10.10.40.140.pkg`) ставится
+(после `-allowUntrusted` — первый прогон без него падал на
+`Certificate used to sign package is not trusted`). Verbose boot
+(`-v keepsyms=1 debug=0x100` через OpenCore's `NVRAM → Add` —
+**обязательно через `config.plist`**, `nvram boot-args=...` из работающей
+системы игнорируется, OpenCore каждый раз накатывает своё значение поверх)
+показывает:
+
+```
+NVDAStartupWeb: Web
+...
+NVDAGM100HAL loaded and registered
+IOConsoleUsers: time(0) 0->0, lin 0, llk 1,
+IOConsoleUsers: gIOScreenLockState 3, hs 0, bs 0, now 0, sm 0x0
+```
+
+**И на этом всё — полный hang.** `NVDAGM100HAL` — правильный класс
+драйвера для GM206/Maxwell (наша GTX950), т.е. драйвер нашёл и
+опознал карту верно. Подтверждено дважды, с двумя независимыми
+попытками фикса:
+
+- **`-machine kernel-irqchip=on`** (добавлен через `qm set --args` вместе
+  с ACPI-hotplug фиксом) — тот же hang, тот же лог, тот же стоп ровно
+  после `IOConsoleUsers`.
+- **`x-vga=1`** (карта как primary VGA вместо std-VGA/`x-vga=0`) — теряет
+  VNC-консоль (`serial_device` — единственный fallback, см. `mod/vm/
+  main.tf`), подтверждено через `/proc/<pid>/io`: `read_bytes` доходит
+  примерно до той же отметки (~598-611 МБ, оба прогона) и **застывает** —
+  идентичная по методу диагностики картина, тот же hang.
+
+`error writing '1' to '.../reset': Inappropriate ioctl for device` при
+каждом старте VM — карта не поддерживает FLR и не может быть сброшена
+программно; но живой PCI-rebind в `gpu-arbiter.sh` уже происходит на
+каждом старте (`swapping host windows -> macos (live PCI rebind)`), и hang
+воспроизводится идентично после каждого такого ребайнда — то есть это не
+эффект "залипшей" от предыдущей попытки карты, а стабильно
+воспроизводимый hang в самой связке драйвер/vfio-pci.
+
+**Диагноз**: это не GOP/BAR-проблема (та решена ACPI-hotplug фиксом
+насовсем) и не проблема конкретной прошивки/версии macOS (дошли до точно
+нужной сборки с точно нужным драйвером) — а hardware-handshake hang на
+уровне самого драйвера при инициализации железа под vfio-pci, той же
+природы, что уже задокументированный в этом README баг класса QEMU
+`pci-quirks.c`/BCM57810 (бесконечное ожидание аппаратного семафора,
+который не резолвится под виртуализацией). Совпадает и с community-
+консенсусом (раздел выше, passthroughpo.st и др.): **Maxwell — заметно
+менее надёжное поколение для реального видеовывода под passthrough, чем
+Pascal и новее.**
+
+VM 103 оставлена в чистом базовом состоянии (`x-vga=0`, только
+ACPI-hotplug `args`, без `kernel-irqchip`) — стабильно грузится по SSH до
+самого этого hang-поинта, гость доступен для дальнейшей диагностики.
+
+### Честный итог по "стабильному" треку
+
+Прогресс реальный и большой (ACPI-visibility фикс, архитектурный
+dead-end ≥ Big Sur найден и обойдён переходом на High Sierra, полный
+install-пайплайн построен и воспроизведён дважды, точная сборка/драйвер
+установлены и подтверждённо матчатся железу) — но **физического вывода
+на монитор так и не достигнуто**: следующий hang оказался глубже
+GOP-уровня, на уровне самого драйверного hardware-handshake, и не
+поддался ни одному из проверенных конфигурационных твиков. Дальнейшие
+шаги (не пробованы в этой сессии): смена железа на Pascal+ (нет другой
+карты на этой ноде), патченная сборка QEMU по образцу
+BCM57810-quirk'а (см. `pci-quirks.c`), либо принять это как
+architecture/hardware-уровневый предел для конкретно этого GPU под
+данным стеком виртуализации.
+
+По явной инструкции пользователя ("сначала стабильную, потом сразу
+экспериментальную... полностью автономно") — после исчерпания разумных
+попыток на этом треке работа продолжается на экспериментальном треке
+(OCLP root-patch для Nvidia Kepler/Maxwell Metal-ускорения на Tahoe, см.
+`hackintosh-nvidia.md` в корне репозитория) в отдельной ветке.

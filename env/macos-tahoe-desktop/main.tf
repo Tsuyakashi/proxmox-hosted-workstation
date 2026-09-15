@@ -25,7 +25,14 @@ module "macos_desktop" {
   memory = var.memory
   mac    = var.mac
 
-  network_model = "virtio" # LongQT-sea/OpenCore-ISO's current guidance for macOS 11-26
+  network_model = "vmxnet3" # AppleVMXNet3Ethernet.kext ships built into every
+  # macOS *including* the trimmed Recovery kernel collection (it's Apple's own
+  # officially-supported VMware-guest driver) -- no OpenCore kext injection
+  # needed at all. e1000/e1000e both left Recovery's `ifconfig -a` completely
+  # empty (no en0, not even after injecting IntelMausiEthernet.kext), which
+  # blocked startosinstall's apple.com clock-verification and swscan catalog
+  # fetch. OSX-KVM's own OpenCore-Boot.sh explicitly notes vmxnet3 for High
+  # Sierra installs for exactly this reason.
   os_type       = "l26"    # no macOS ostype in Proxmox; "Linux" is LongQT-sea's explicit pick
 
   disk_interface = "sata0"
