@@ -678,3 +678,147 @@ architecture/hardware-уровневый предел для конкретно 
 попыток на этом треке работа продолжается на экспериментальном треке
 (OCLP root-patch для Nvidia Kepler/Maxwell Metal-ускорения на Tahoe, см.
 `hackintosh-nvidia.md` в корне репозитория) в отдельной ветке.
+
+## Настоящая причина: это не hang, это kernel panic (2026-09-15/16)
+
+**Предыдущий раздел был неверен в диагнозе.** То, что описано выше как
+"hardware-handshake hang", на самом деле — **kernel panic, замаскированная
+под зависание**. Маскировал её мой же boot-arg `debug=0x100`: с любым
+ненулевым `debug` XNU после паники не перезагружается, а уходит в
+kdp-ожидание удалённого отладчика **навсегда**. Отсюда и "вечное
+зависание" вместо boot-loop'а.
+
+### Как это доказано (метод пригодится и дальше)
+
+Порядок шагов, каждый из которых отбрасывал по гипотезе:
+
+1. `/proc/<qemu-pid>/io` стоит, но **CPU 370-400%** — то есть крутятся все
+   4 ядра, это не "ожидание железа", а активный спин.
+2. `/proc/interrupts`: у карты `vfio-msi[0](0000:01:00.0)` счётчик замер
+   на **4** и не растёт → **interrupt storm'а нет** (гипотеза отброшена).
+3. `tap103i0` `rx_packets` не меняется 20 с → гость не шлёт вообще ничего,
+   сетевой стек стоит.
+4. `info registers -a` через QMP: **все vCPU в CPL=0**, три из них в одном
+   и том же тугом цикле → не userspace, не WindowServer-crash-loop.
+5. Прогулка по цепочке стек-фреймов (RBP → `[RBP]`/`[RBP+8]`) с
+   символизацией: в стеке нашлись `_panic` → `_panic_trap_to_debugger` →
+   `_kdp_raise_exception` → `_kdp_send_crashdump_pkt`. **Это паника.**
+
+Символизация сделана так (воспроизводимо):
+
+- ядро гостя вытащено с диска VM прямо на хосте: `losetup -r -P` на
+  `/dev/pve/vm-103-disk-1`, `mount -t hfsplus -o ro ...p2`, копия
+  `/System/Library/Kernels/kernel` (build подтверждён — 17G14042);
+- KASLR-слайд найден сканированием памяти гостя на Mach-O magic
+  `0xfeedfacf` по 2 МБ-выравненным адресам ниже минимального RIP;
+- дальше символы берутся из `LC_SYMTAB` самого ядра, а кексты — из списка
+  `_kmod` в памяти (структура `kmod_info` **упакована по 4 байта**:
+  `address` на смещении 156, `size` на 164 — с "естественными" 160/168
+  получается мусор);
+- текст паники целиком лежит в памяти между `_debug_buf_base` и
+  `_debug_buf_ptr` (~9 КБ) и читается через QMP (`x /Nbx`; `memsave` на
+  этой сборке молча ничего не пишет).
+
+### Сама паника
+
+```
+panic(cpu 2 caller ...): Kernel trap at 0xffffff7f982ae5de, type 14=page fault
+CR2: 0x0000000000001bc2   RDI: 0x0, RAX: 0x0        Fault CPU: 0x2 VMM
+  com.nvidia.web.NVDAResmanWeb : _dfpInitExternalEncoder_Stub + 0xa0aa
+  com.nvidia.web.NVDAResmanWeb : _rmControlInternal + 0x2f7
+  com.nvidia.web.NVDAResmanWeb : _CliGetDispFromGpu + 0x71b
+  ...
+  com.nvidia.web.NVDAResmanWeb : NVDA::doDriverIO(...)
+  com.apple.iokit.IONDRVSupport : IONDRVFramebuffer::checkDriver() + 0x81
+  com.apple.iokit.IONDRVSupport : IONDRVFramebuffer::enableController() + 0xa1
+  com.nvidia.web.NVDAResmanWeb : NVDA::enableController() + 0x4e4
+  com.apple.iokit.IOGraphics!F : IOFramebuffer::open() + 0x62d
+  com.nvidia.web.NVDAResmanWeb : NVDA::newUserClient(...)
+BSD process name corresponding to current thread: WindowServer
+```
+
+Читается однозначно: драйвер грузится нормально (`NVDAGM100HAL loaded and
+registered` — правильный HAL для GM206), но **в момент, когда WindowServer
+первый раз открывает фреймбуфер**, RM падает по NULL.
+
+### Что именно NULL (дизассемблер + NVOC)
+
+Место падения, `NVDAResmanWeb va 0x1005bf`:
+
+```
+mov  esi, [rbx+0x4]          ; 1
+mov  rdi, r14
+call QWORD PTR [r14+0x220]   ; метод объекта-владельца
+mov  r12, rax                ; объект вернулся, НЕ NULL
+lea  rsi, [rip+0x511e6a]     ; -> NVOC class-def 0x612440
+mov  rdi, r12
+call 0x288df0                ; ___nvoc_dynamicCast
+cmp  BYTE PTR [rax+0x1bc2], 0   ; <-- rax = NULL, падение
+```
+
+То есть каст к ожидаемому классу возвращает NULL, **и результат не
+проверяется**. По NVOC-структурам из памяти гостя:
+
+| объект | class-id | размер | что это |
+|---|---|---|---|
+| владелец (`R14`) | `0xd1755e` | `0x3128` | **`OBJDISP`** — подтверждено по `g_eng_desc_nvoc.h` из NVIDIA `open-gpu-kernel-modules` |
+| ожидался | `0xdf38e6` | `0x1f28` | в открытых исходниках не найден (драйвер 2019 г., RM 10.3.3) |
+| реально вернулся | `0x21646f` | `0x990` | другой класс — поэтому каст и не прошёл |
+
+Ближайший символ к месту падения — `dfpInitExternalEncoder` (DFP =
+digital flat panel), то есть код настройки цифрового дисплея. Объект
+дисплейного движка у GPU есть, но под запрошенным индексом лежит объект
+не того класса.
+
+### Отброшенные гипотезы (все дают ПОБАЙТОВО одинаковую панику)
+
+Каждая проверена реальной загрузкой с чтением паник-лога из памяти:
+
+| гипотеза | как проверялась | результат |
+|---|---|---|
+| прерывания (известный баг Q35) | `-machine kernel-irqchip=on` | та же паника |
+| VGA-арбитраж / primary GPU | `x-vga=1` | та же паника |
+| детект гипервизора (Code 43) | `cpu host,hidden=1` → `kvm=off` в `qm showcmd` | та же паника |
+| модель CPU / power management | `cpu Penryn,hidden=1,flags=+pcid` | та же паника (предупреждение про `unknown CPU model 0x3c` ушло, паника осталась) |
+| AGPM в control-path карты | `Kernel -> Block` для `AppleGraphicsPowerManagement` | та же паника |
+| карта не POST-нута | `romfile=gtx950.rom` (GOP) + проверка devinit-флага `0x2240c` бит1 через BAR0 с хоста | **флаг выставлен и без ROM** — карта POST-нута, паника та же |
+| WhateverGreen патчит NVDAResman | `-wegoff` | та же паника |
+| SMBIOS ждёт встроенную панель | `SystemProductName = MacPro5,1` (+ включён блок `AppleTyMCEDriver`) | та же паника |
+
+**Важная методическая ошибка, не повторять:** открытый 22-й порт ≠
+успешная загрузка. `sshd` поднимается по launchd **раньше**, чем
+WindowServer открывает фреймбуфер, поэтому на `-wegoff` SSH успел
+ответить за ~15 с, а паника наступила через ~20 с после этого. Критерий
+успеха — дождаться плато, проверить отсутствие паники в памяти **и**
+реально выполнить команду по SSH.
+
+### Что реально выиграно: картинка на физическом мониторе
+
+Связка, которую раньше не пробовали вместе:
+
+```
+qm set 103 --hostpci0 mapping=gtx950,pcie=1,rombar=1,romfile=gtx950.rom,x-vga=1
+```
+
+— `x-vga=1` (карта primary) **плюс** GOP-VBIOS через `romfile`. OVMF
+исполняет GOP-драйвер карты, и на физическом мониторе **впервые за весь
+проект появляется изображение с самой GTX 950**: и picker OpenCore, и
+verbose-лог ядра XNU (подтверждено фотографиями монитора). До рабочего
+стола не доходит — на открытии фреймбуфера ловится описанная паника, — но
+сам вывод на монитор с passthrough-карты теперь работает.
+
+Отдельно: `rom_file` **больше не подвешивает OVMF** (старая находка выше
+устарела) — тот hang был следствием неназначенных BAR'ов, которые чинит
+ACPI-hotplug фикс. Ещё мелочь: picker OpenCanopy **не реагирует на мышь
+вообще**, только клавиатура (стрелки + Enter).
+
+### Что осталось
+
+Паника — в закрытом бинарнике NVIDIA, исходников нет. Осмысленные
+варианты дальше: (а) понять, почему под запрошенным индексом оказывается
+объект другого класса (вероятно связано с тем, как RM видит набор
+дисплеев/коннекторов этой карты в VM), (б) сменить поколение GPU на
+Pascal+, (в) экспериментальный трек на Tahoe + OCLP
+(`env/macos-tahoe-oclp`), где используется **другой** драйверный код
+(старые нативные Apple-кексты, вбитые root-патчем), а не закрытый
+NVIDIA Web Driver, — поэтому этой конкретной паники там может не быть.
