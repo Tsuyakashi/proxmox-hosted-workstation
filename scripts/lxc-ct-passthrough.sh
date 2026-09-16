@@ -113,8 +113,8 @@ fi
 
 # ------------------------------------------------------------
 # 4. Raw lxc.* — things dev[n] can't express:
-#    - USB / input / sound *directories* + webcam video4linux nodes (bind +
-#      cgroup major ranges)
+#    - USB / input / sound *directories* + webcam video4linux nodes + tun
+#      (bind + cgroup major ranges)
 #    - the physical seat: framebuffer + tty7 so an Xorg inside the CT can
 #      become DRM-master and light the monitors. NEVER bind /dev/console,
 #      /dev/tty0, or the getty ttys (tty1/tty2) — LXC / Proxmox own those and
@@ -163,20 +163,26 @@ lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,creat
 lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir 0 0
-# USB (189) / input (13) / ALSA (116) / usb-ACM (166) / tty (4) / fb (29) / uinput (10:223)
+# USB (189) / input (13) / ALSA (116) / usb-ACM (166) / tty (4) / fb (29) /
+# misc (10: uinput=223, tun=200 -- allow the whole major rather than pile up
+# one cgroup line per minor)
 lxc.cgroup2.devices.allow: c 189:* rwm
 lxc.cgroup2.devices.allow: c 13:* rwm
 lxc.cgroup2.devices.allow: c 116:* rwm
 lxc.cgroup2.devices.allow: c 166:* rwm
 lxc.cgroup2.devices.allow: c 4:* rwm
 lxc.cgroup2.devices.allow: c 29:* rwm
-lxc.cgroup2.devices.allow: c 10:223 rwm
+lxc.cgroup2.devices.allow: c 10:* rwm
 lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/input dev/input none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir 0 0
 lxc.mount.entry: /dev/fb0 dev/fb0 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/vga_arbiter dev/vga_arbiter none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/uinput dev/uinput none bind,optional,create=file 0 0
+# tailscaled (or any userspace VPN) needs this to create its tun interface --
+# CreateTUN fails without it. Static major/minor (10:200), unlike the
+# GPU nodes there's no boot-order race to worry about.
+lxc.mount.entry: /dev/net/tun dev/net/tun none bind,optional,create=file 0 0
 # video4linux (81): USB webcams (UVC) show up as /dev/videoN alongside their
 # already-passed-through USB-audio interface (via /dev/bus/usb + /dev/snd) --
 # the mic works without this, the camera does not: uvcvideo creates separate
