@@ -90,6 +90,46 @@ IOGraphics/IONDRVSupport и userspace-патчи OCLP), что оставляе�
 5. Если ловим ту же панику — откатить root-патч (OCLP умеет revert) и
    оставить рабочее состояние из п.3.
 
+## Разведка OCLP на pve-rog (2026-09-16, GTX 770M / Kepler)
+
+OCLP 2.5.0 поставлен в гостя (`/Applications/OpenCore-Patcher.app`) и
+опрошен **без единого изменения системы** — `--patch_sys_vol` при
+включённом SIP отказывается работать *до* каких-либо правок и печатает
+разбор причин. Результат:
+
+```
+- Determining Required Patch set for Darwin 25
+Pulling metallib list from MetallibSupportPkg API
+No metallibs found for 25G83 (26.6.2)
+- Cannot continue with patching!!!
+- Breakdown:
+  - Unsupported Host OS              <- снято через touch ~/.dortania_developer
+  - System Integrity Protection is enabled
+  - Booted SIP: 0x40 vs expected: 0x803
+  - AMFI is enabled
+```
+
+Что из этого следует:
+
+1. **Гейт версии ОС снимается** штатным `~/.dortania_developer` —
+   подтверждено, после него строка `Unsupported Host OS` исчезает.
+2. Остаются ровно два гейта, и оба — осознанное ослабление защиты:
+   `csr-active-config = 0x803` (вместо текущего `0x40`) и `amfi=0x80`.
+   Автономный агент их не выполняет (защита от security-weakening), это
+   решение владельца машины. Причём `boot-args` в этом OpenCore-конфиге
+   перечислены в `NVRAM -> Delete`, то есть навязываются при каждой
+   загрузке — `amfi=0x80` придётся вносить в сам ISO, а не через `nvram`
+   из работающей системы. А вот `csr-active-config` в `Delete` **не**
+   указан, поэтому значение, выставленное из ОС/Recovery, переживёт
+   перезагрузку.
+3. **Отдельный, более неприятный сигнал**: `No metallibs found for 25G83
+   (26.6.2)`. Патчсет для Kepler — Metal-овый, и ему нужны metallib'ы из
+   `MetallibSupportPkg` под конкретную сборку ОС. Для 26.6.2 их нет. То
+   есть даже после снятия обоих гейтов Kepler-ускорение на **этой**
+   сборке Tahoe может не собраться. Более вероятный рабочий вариант для
+   ускорения на 770M — **Sequoia (macOS 15)**, официально поддерживаемая
+   OCLP связка, а не Tahoe 26.
+
 ## Отличие от прошлого захода на OCLP
 
 В прошлый раз OCLP на этой же машине накатил только `Legacy USB 1.1`
