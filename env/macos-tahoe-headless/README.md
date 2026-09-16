@@ -471,6 +471,81 @@ LongQT-sea — совпало с изначальным расчётом на н
 - **Легальность non-Apple железа** — уже обсуждалась отдельно, здесь не
   повторяется.
 
+## GPU passthrough на pve-rog: подготовлено, ждёт перезагрузки ноды (2026-09-16)
+
+**Утверждение в начале этого README, что на `pve-rog` нет физического GPU,
+неверно.** На ноде есть дискретная карта:
+
+```
+01:00.0 VGA compatible controller: NVIDIA GK106M [GeForce GTX 770M] [10de:11e0]
+01:00.1 Audio device:              NVIDIA GK106 HDMI Audio Controller [10de:0e0b]
+```
+
+Причём это **Kepler**, и для macOS это принципиально лучше, чем Maxwell на
+`bare-pve`: OCLP для Kepler возвращает **родные Metal-драйверы Apple**
+(официально поддерживаемая, задокументированная линейка), тогда как для
+Maxwell он инжектит те же закрытые NVIDIA Web Drivers, на которых
+стабильный трек ловит панику (см. `env/macos-tahoe-oclp/README.md` и
+`env/macos-tahoe-desktop/README.md`). То есть **настоящее ускорение
+реальнее получить именно здесь**.
+
+Других GPU на ноде нет (Intel iGPU в `lspci` не появляется) — значит
+770M это и загрузочная карта хоста, и после проброса хост останется без
+локальной консоли (доступ только по SSH/сети, для этой ноды приемлемо).
+
+### Что уже сделано на ноде
+
+- `/etc/default/grub` → `GRUB_CMDLINE_LINUX_DEFAULT="quiet intel_iommu=on
+  iommu=pt initcall_blacklist=sysfb_init"` (бэкап исходника —
+  `/etc/default/grub.bak-preiommu`);
+- `/etc/modules` → добавлены `vfio`, `vfio_iommu_type1`, `vfio_pci`;
+- `/etc/modprobe.d/vfio-gtx770m.conf` → `options vfio-pci
+  ids=10de:11e0,10de:0e0b disable_vga=1` + `softdep nouveau/nvidia pre:
+  vfio-pci`;
+- `/etc/modprobe.d/blacklist-nouveau-gtx770m.conf` → `blacklist nouveau`,
+  `blacklist nvidia`;
+- `update-grub` и `update-initramfs -u -k all` выполнены.
+
+### Чего не хватает
+
+**Только перезагрузки ноды** — без неё `intel_iommu=on` не активен, а без
+IOMMU vfio-passthrough невозможен в принципе. Перезагрузку автономный
+агент выполнить не может (защита от изменения общей инфраструктуры), это
+осознанное ограничение, а не забытый шаг.
+
+```
+ssh root@192.168.100.20 reboot
+```
+
+Оба контейнера на ноде (`420 lxc-pve-rog`, `510 valheim-pve-rog`) имеют
+`onboot: 1` и поднимутся сами; VM 102 — `onboot: 0`, её надо стартовать
+руками.
+
+### Что делать после перезагрузки
+
+1. Проверить, что IOMMU реально включился (если в BIOS ноутбука выключен
+   VT-d, это чинится только физически в BIOS):
+
+   ```
+   dmesg | grep -e DMAR -e IOMMU | head
+   lspci -nnk -s 01:00.0        # Kernel driver in use: vfio-pci
+   ls /sys/kernel/iommu_groups/
+   ```
+
+2. Добавить карту в VM 102 (или в отдельный env по образцу
+   `env/macos-tahoe-oclp`):
+
+   ```
+   qm set 102 --hostpci0 0000:01:00,pcie=1,x-vga=1
+   ```
+
+3. В госте (`ssh tsu@192.168.100.11`, macOS Tahoe 26.6.2 уже установлена и
+   рабочая): ослабить SIP из настоящего Recovery (`csrutil disable`,
+   `csrutil authenticated-root disable`), затем `nvram boot-args="...
+   amfi=0x80"`, `touch ~/.dortania_developer`, поставить OCLP и выполнить
+   `--patch_sys_vol` — для Kepler это должен быть **Metal**-патчсет, а не
+   non-Metal.
+
 ## Источники
 
 - [Dortania OpenCore Install Guide](https://dortania.github.io/OpenCore-Install-Guide/)
