@@ -356,6 +356,41 @@ if [ "$INSTALL_DISCORD" = 1 ] && ! dpkg -l discord 2>/dev/null | grep -q '^ii'; 
   [ -s /root/discord.deb ] && app apt-get install -y /root/discord.deb || log "discord skipped"
 fi
 
+# Discord's Ozone/native-Wayland path never registers a keybind: opening
+# Settings -> Keybinds -> record and pressing a key shows nothing at all
+# (confirmed: zero /dev/input/eventN fds ever opened by any Discord
+# process, and an uncaught renderer promise rejection at the moment of the
+# attempt). Forcing it onto X11/XWayland fixes recording. NOTE this is a
+# partial fix -- the bind then only fires while the Discord window has
+# focus; a real background/global hotkey needs XGrabKey-style access mutter
+# deliberately doesn't give XWayland clients while unfocused (Wayland's
+# security model, not a config knob). A user-level .desktop override (not
+# apt's /usr/share/applications/ one) survives Discord's self-updater.
+if [ "$INSTALL_DISCORD" = 1 ] && command -v discord >/dev/null; then
+  install -d -o "$SEAT_USER" -g "$SEAT_USER" "${SEAT_HOME}/.local/share/applications"
+  cat >"${SEAT_HOME}/.local/share/applications/discord.desktop" <<'EOF'
+[Desktop Entry]
+Name=Discord
+StartupWMClass=discord
+Comment=All-in-one voice and text chat for gamers, forced onto X11/XWayland -- see lxc-ubuntu-desktop-provision.sh for why (Ozone/native-Wayland never registers a keybind at all).
+GenericName=Internet Messenger
+Exec=env ELECTRON_OZONE_PLATFORM_HINT=x11 /usr/bin/discord --ozone-platform=x11 --url -- %u
+Icon=discord
+Type=Application
+Categories=Network;InstantMessaging;
+MimeType=x-scheme-handler/discord;
+Path=/usr/bin
+EOF
+  chown "$SEAT_USER:$SEAT_USER" "${SEAT_HOME}/.local/share/applications/discord.desktop"
+  # The autostart entry (only present once the user has opened Discord and
+  # left "open on startup" on) is the user's own file, not apt's -- patch it
+  # in place if it exists, skip quietly otherwise.
+  AUTOSTART="${SEAT_HOME}/.config/autostart/discord.desktop"
+  [ -f "$AUTOSTART" ] && sed -i \
+    "s|^Exec=.*|Exec=env ELECTRON_OZONE_PLATFORM_HINT=x11 /usr/bin/discord --ozone-platform=x11|" \
+    "$AUTOSTART"
+fi
+
 install -d -m 0755 /etc/apt/keyrings
 addkey() { curl -4 -fsSL "$2" | gpg --batch --yes --dearmor -o "$1"; }
 if [ "$INSTALL_CHROME" = 1 ] && ! command -v google-chrome >/dev/null; then
