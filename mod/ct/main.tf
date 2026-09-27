@@ -2,10 +2,13 @@
 #
 # Counterpart of mod/vm. mod/vm hands whole PCI functions to a guest via
 # vfio-pci hardware mappings; a container instead runs on the host kernel and
-# gets individual host device nodes. Those nodes (`dev[n]:`), the hookscript,
-# and every feature flag except `nesting` are hard-coded root@pam in Proxmox,
-# so this module only does what an API token can — the rest is applied on the
-# node by scripts/lxc-ct-passthrough.sh.
+# gets individual host device nodes (GPU, USB/input/snd, /dev/net/tun,
+# video4linux). Those go in as raw `lxc.mount.entry` + `lxc.cgroup2.devices.allow`
+# lines, not `dev[n]:` (dev[n] paths are validated before the gpu-arbiter
+# pre-start hook can create them). Raw lxc.* keys, the hookscript and every
+# feature flag except `nesting` are root@pam in Proxmox, so this module only
+# does what an API token can — the rest is applied on the node by
+# scripts/lxc-ct-passthrough.sh.
 #
 # The two approaches to the same GPU are MUTUALLY EXCLUSIVE at the host level:
 # vfio-pci binding (mod/vm) vs. the host NVIDIA driver (this module). The flip
@@ -76,8 +79,8 @@ resource "proxmox_virtual_environment_container" "this" {
   # privileged CT every feature flag — nesting included — is root@pam, so the
   # token must not send the block at all (it 403s the whole create). Every
   # other flag (keyctl, fuse, mount) is root@pam regardless. All of these,
-  # plus the dev[n] / hookscript bits, are applied on the node by
-  # scripts/lxc-ct-passthrough.sh.
+  # plus the raw lxc.* device lines and the hookscript, are applied on the
+  # node by scripts/lxc-ct-passthrough.sh.
   dynamic "features" {
     for_each = var.unprivileged ? [1] : []
     content {

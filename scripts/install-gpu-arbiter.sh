@@ -32,8 +32,9 @@ fi
 
 cat <<'EOF'
 
-Next — attach the hookscript to the guests (Terraform does this via
-hook_script_file_id, or by hand):
+Next — attach the hookscript to the guests. `hookscript:` is root@pam-only,
+so the API token (Terraform) can't set it — do it on the node (for the CT,
+lxc-ct-passthrough.sh <ctid> already does):
 
   pct set <ubuntu-ctid>  --hookscript local:snippets/gpu-arbiter.sh
   qm  set <windows-vmid> --hookscript local:snippets/gpu-arbiter.sh   # optional

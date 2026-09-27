@@ -290,6 +290,9 @@ lock-after=false
 EOF
 printf 'Default_keyring' >"${SEAT_HOME}/.local/share/keyrings/default"
 chown -R "$SEAT_USER:$SEAT_USER" "${SEAT_HOME}/.local/share/keyrings"
+# `install -d -o` only owns the LAST path component, so ~/.local and
+# ~/.local/share were left root:root (gh, GNOME can't write there).
+chown -R "$SEAT_USER:$SEAT_USER" "${SEAT_HOME}/.local" "${SEAT_HOME}/.config"
 
 # ------------------------------------------------------------
 # 5b. gnome-remote-desktop: RDP into the live session (morning/away access)

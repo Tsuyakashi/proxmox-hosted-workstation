@@ -8,10 +8,11 @@ Terraform-конфигурация для развёртывания рабоч�
 - **`env/ubuntu`** — **privileged** LXC-контейнер, который **разделяет** драйвер
   ядра хоста и получает GPU как набор device-нод (`/dev/nvidia*`,
   `/dev/dri/*`). Ни OVMF, ни vfio, ни Code 43. Полноценный GNOME 50 / Wayland
-  на физических мониторах. Privileged CT токену создать нельзя (нужен
-  `Sys.Modify` на `/`), поэтому его делает `scripts/ct-recreate.sh` на ноде +
-  `terraform import`; root@pam-only части (`dev[n]`, `hookscript`, `features`,
-  `apparmor`, `sys:rw`) доводит `scripts/lxc-ct-passthrough.sh` — см.
+  на физических мониторах. Privileged CT создаёт `terraform apply` тем же
+  токеном (роли нужен `Sys.Modify` на `/` — его добавляет
+  `scripts/pve-role-init.sh`); root@pam-only части (device-ноды сырыми
+  `lxc.*`, `hookscript`, `features`, `apparmor`, `sys:rw`) доводит
+  `scripts/lxc-ct-passthrough.sh` — см.
   [root@pam-ограничения LXC](#rootpam-ограничения-lxc).
 
 - **`env/macos-tahoe-desktop`** — третье состояние того же железа: полноценная
@@ -55,7 +56,7 @@ OS:               Proxmox VE 9.2.2 x86_64
 Kernel:           Linux 7.0.2-6-pve
 Bootloader:       GRUB
 Terraform:        >= 1.16.1
-Provider:         bpg/proxmox 0.111.1
+Provider:         bpg/proxmox >= 0.111.1
 State backend:    S3-compatible (MinIO)
 Secrets:          HashiCorp Vault
 LXC guest:        Ubuntu 26.04 LTS · NVIDIA 580.178.04 (host + CT userspace)
@@ -97,8 +98,11 @@ Board: ASRock H81M-VG4 R2.0, UEFI P1.50
   `proxmox_hardware_mapping_pci` (vfio-pci, целые PCI-функции).
 - **`mod/ct`** — универсальный модуль LXC-контейнера. GPU не пробрасывается как
   PCI-устройство: контейнер работает на ядре хоста и получает device-ноды
-  (`/dev/nvidia*`, `/dev/dri/*`) через `dev[n]:` — их ставит
-  `scripts/lxc-ct-passthrough.sh` (root@pam-only), а не токен-terraform.
+  (`/dev/nvidia*`, `/dev/dri/*`, USB/input/snd, `/dev/net/tun`,
+  video4linux `/dev/video*`) сырыми `lxc.mount.entry` +
+  `lxc.cgroup2.devices.allow` — их пишет `scripts/lxc-ct-passthrough.sh`
+  (root@pam-only), а не токен-terraform. `dev[n]:` не используется (скрипт
+  его удаляет): Proxmox валидирует пути `dev[n]` до pre-start хука арбитра.
 - **`env/<name>`** — конкретные окружения:
   - `env/windows` — Windows-рабочка (VM, `mod/vm`).
   - `env/ubuntu` — Ubuntu 26.04 **desktop LXC** (`mod/ct`), полноценный
@@ -185,8 +189,8 @@ proxmox-hosted-workstation/
 ├── scripts/
 │   ├── iommu-vfio-setup.sh              # хост -> vfio-pci (первичная подготовка, env/windows)
 │   ├── lxc-nvidia-host-setup.sh         # хост -> драйвер nvidia 580 (первичная подготовка, env/ubuntu)
-│   ├── lxc-ct-passthrough.sh            # на ноде: root@pam-биты CT (dev[n] GPU / features / hookscript / USB)
-│   ├── ct-recreate.sh                  # на ноде: pct create --unprivileged 0 (токену нельзя) + подсказка terraform import
+│   ├── lxc-ct-passthrough.sh            # на ноде: root@pam-биты CT (сырые lxc.* GPU/USB/input/snd/tun/video4linux / features / hookscript)
+│   ├── pve-role-init.sh                 # на ноде: докинуть в общую роль TerraformProv недостающие права (Sys.Modify и др.)
 │   ├── lxc-ubuntu-desktop-provision.sh  # внутри CT: ubuntu-desktop (GNOME 50) + userspace NVIDIA + GDM-автологин + RDP + Steam/Discord/Chrome/VS Code
 │   ├── gpu-arbiter.sh                   # Proxmox pre-start хук: своп GPU/USB + lock (движок)
 │   ├── workstation.sh                   # CLI поверх арбитра: status / start --force / --via-reboot
@@ -200,8 +204,10 @@ proxmox-hosted-workstation/
 ## Требования
 
 - Terraform >= 1.16.1
-- Доступ к Proxmox VE API по токену (роль с `Mapping.Modify` + `Mapping.Use`,
-  см. [Права токена Terraform](#права-токена-terraform)) — root не требуется
+- Доступ к Proxmox VE API по токену (роль с `Mapping.Modify` + `Mapping.Use`
+  + `Sys.Modify` на `/`; недостающие права добавляет
+  `scripts/pve-role-init.sh`, см. [Права токена Terraform](#права-токена-terraform))
+  — root не требуется
 - HashiCorp Vault с настроенными секретами (см. [Секреты и Vault](#секреты-и-vault))
 - S3-совместимое хранилище для state (в проекте — MinIO)
 - Хост, подготовленный под нужный режим GPU (см.
@@ -275,7 +281,8 @@ lspci -k -s <gpu-pci-addr>   # ожидаем "Kernel driver in use: vfio-pci"
    годятся (Turing+).
 6. `modules-load.d` + `nvidia-drm modeset=1 fbdev=1` + udev (`nvidia-modprobe`)
    — `/dev/nvidia*`, `/dev/dri/*`, `/dev/fb0` и DRM-коннекторы без X-сервера
-   (нужны, чтобы Xorg внутри CT зажёг мониторы). `update-initramfs`.
+   (нужны, чтобы GDM-сессия GNOME 50 / Wayland внутри CT взяла DRM-master и
+   зажгла мониторы). `update-initramfs`.
 
 ```bash
 ssh bare-pve 'NVIDIA_VERSION=580.178.04 bash -s' < scripts/lxc-nvidia-host-setup.sh
@@ -347,7 +354,7 @@ return 1 if $authuser eq 'root@pam';
 | `hookscript:` | только `root@pam` |
 | `features:` — всё кроме `nesting` (`keyctl`, `fuse`, `mount`) | только `root@pam` |
 | `features: nesting=1` (только на **unprivileged** CT) | токен + `VM.Allocate` ✓ |
-| создать **privileged** CT (`unprivileged=0`) | нужен `Sys.Modify` на `/` — токену нет → `ct-recreate.sh` на ноде |
+| создать **privileged** CT (`unprivileged=0`) | токен + `Sys.Modify` на `/` ✓ (выдаёт `pve-role-init.sh`) |
 | любой `features`-флаг на **privileged** CT | root@pam (`lxc-ct-passthrough.sh`) |
 | rootfs, net, memory, cores, tags, … | токен ✓ |
 
@@ -356,19 +363,25 @@ return 1 if $authuser eq 'root@pam';
 root (`pct set` в CLI работает как `root@pam`; либо правка
 `/etc/pve/lxc/<id>.conf` напрямую — классический до-8.2 способ).
 
-**Этот проект — (б).** `terraform` тем же токеном, что и VM, создаёт CT и ставит
-`nesting`; `scripts/lxc-ct-passthrough.sh` на ноде доводит остальное:
+**Этот проект — (б).** `terraform` тем же токеном, что и VM, создаёт
+privileged CT (без `features` — на privileged CT токену нельзя ни одного
+флага); `scripts/lxc-ct-passthrough.sh` на ноде доводит остальное:
 
 ```bash
 ssh bare-pve scripts/lxc-ct-passthrough.sh <ctid>
 ```
 
-- GPU-ноды → **нативный** `pct set --devN` (Proxmox сам делает cgroup allow +
-  mount + права ноды в unprivileged CT);
+- удаляет любые `dev[n]:` — Proxmox проверяет их пути **до** pre-start хука,
+  поэтому при карте на `vfio-pci` старт падал бы раньше, чем арбитр её
+  перепривяжет;
 - `pct set --features nesting=1,keyctl=1,fuse=1`;
 - `pct set --hookscript local:snippets/gpu-arbiter.sh`;
-- `/dev/bus/usb` + `/dev/input` + `/dev/snd` (у них нет `dev[n]`-аналога) —
-  сырыми `lxc.mount.entry` в конфиг + host-udev `MODE="0666"`.
+- seat-блок сырых `lxc.*` в конфиге: GPU (`/dev/nvidia*`, `/dev/dri`),
+  `/dev/bus/usb` + `/dev/input` + `/dev/snd`, `/dev/fb0`, `/dev/tty7`,
+  `/dev/uinput`, `/dev/net/tun` (tailscaled), video4linux `/dev/video0..3`
+  (веб-камера) — `lxc.mount.entry ... bind,optional` +
+  `lxc.cgroup2.devices.allow`, плюс `apparmor: unconfined` и
+  `lxc.mount.auto: proc:rw sys:rw`; host-udev `MODE="0666"`.
 
 Повторять после `terraform apply`, который пересоздаёт CT.
 
@@ -496,11 +509,6 @@ terraform -chdir=env/ubuntu  init && terraform -chdir=env/ubuntu  apply   # со
 ssh bare-pve scripts/workstation.sh start windows    # запустить одну из них
 ```
 
-`env/ubuntu` при первом `apply` **пересоздаёт** ресурс (был
-`proxmox_virtual_environment_vm`, стал `proxmox_virtual_environment_container`
-в том же state-ключе `ubuntu/terraform.tfstate`) — `moved`-блок между разными
-типами ресурсов невозможен, старую VM Terraform снесёт и создаст контейнер.
-
 ### Права токена Terraform
 
 Официальный README провайдера (bpg/proxmox, секция Known Issues) утверждает,
@@ -532,6 +540,22 @@ pveum role modify TerraformProv --privs "<существующие-права-ч
 pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "TerraformProv"'
 ```
 
+Вручную собирать список не нужно: `scripts/pve-role-init.sh` знает все права,
+которые нужны этому репо (`Mapping.*`, `VM.*`, `Datastore.*`, `SDN.Use` и
+**`Sys.Modify`** — без него токен не создаст privileged CT для `env/ubuntu`,
+pve-container проверяет его ровно на `/`). Роль `TerraformProv` общая с
+другими репо (её владелец — `iac-proxmox-lab`), поэтому скрипт её только
+**расширяет**: читает текущие права, добавляет недостающие, ничего не удаляет,
+повторный запуск — no-op. Сначала посмотреть diff, потом применить:
+
+```bash
+ssh root@bare-pve 'DRY_RUN=1 bash -s' < scripts/pve-role-init.sh   # только показать недостающее
+ssh root@bare-pve 'bash -s' < scripts/pve-role-init.sh
+```
+
+`Sys.Modify` действует только там, где ACL выдаёт роль токену — роль должна
+быть назначена на `/` (`propagate=1`): `pveum acl list | grep -i terraform`.
+
 ## Переменные
 
 ### `env/windows`
@@ -543,12 +567,12 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `proxmox_insecure`         | bool        | `true`                       | Пропускать проверку TLS-сертификата         |
 | `proxmox_api_token`        | string      | — (sensitive)                | API-токен `terraform@pve`                   |
 | `vm_name`                  | string      | `windows-workstation`        | Имя VM                                      |
-| `cores`                    | number      | `2`                          | Количество ядер CPU                         |
-| `memory`                   | number      | `4096`                       | RAM, МБ                                     |
+| `cores`                    | number      | `4`                          | Количество ядер CPU                         |
+| `memory`                   | number      | `12288`                      | RAM, МБ                                     |
 | `mac`                      | string      | `BC:24:11:F9:5D:82`          | MAC-адрес сетевого интерфейса               |
 | `os_type`                  | string      | `win10`                      | Тип гостевой ОС (`win10`, `win11`, `l26`)   |
 | `agent_enabled`            | bool        | `false`                      | QEMU guest agent (включать после установки virtio-тулзов) |
-| `iso_file_id`              | string      | `local:iso/Win10_22H2_...`   | Volume ID установочного ISO                 |
+| `iso_file_id`              | string      | `null`                       | Volume ID ISO (`null` — пустой привод; `local:iso/Win10_22H2_...` только на переустановку) |
 
 `env/windows` передаёт в `mod/vm` `on_boot = false` — стартом управляет
 `scripts/workstation.sh`, автозапуска на буте нет.
@@ -567,14 +591,15 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `swap`              | number       | `0`                                                    | Swap, МиБ                                       |
 | `unprivileged`      | bool         | `false`                                                 | **Privileged** — GNOME/GDM нужна graphical logind-сессия + udev |
 | `template_file_id`  | string       | `local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst` | LXC-шаблон (minimal rootfs, **не** cloud); `pveam download local <...>` |
-| `disk_size`         | number       | `40`                                                   | rootfs, ГиБ                                     |
+| `disk_size`         | number       | `64`                                                   | rootfs, ГиБ                                     |
 | `mac`               | string       | `BC:24:11:AB:CD:01`                                     | MAC (отличается от windows)                     |
 | `ipv4_address`      | string       | `dhcp`                                                  | `dhcp` или статический CIDR                     |
 | `ipv4_gateway`      | string       | `null`                                                  | Шлюз для статического адреса                    |
 | `ssh_public_keys`   | list(string) | `[]`                                                    | Ключи root внутри CT                            |
 
-`env/ubuntu` жёстко задаёт `start_on_boot = false` и `nesting`. GPU-ноды,
-`hookscript`, `keyctl`/`fuse`, USB/input/sound — всё через
+`env/ubuntu` жёстко задаёт `start_on_boot = false` и `started = false`;
+`features` (privileged CT) не шлёт. GPU-ноды, `hookscript`,
+`nesting`/`keyctl`/`fuse`, USB/input/sound — всё через
 `scripts/lxc-ct-passthrough.sh` на ноде (root@pam-only, см.
 [root@pam-ограничения LXC](#rootpam-ограничения-lxc)).
 
@@ -586,7 +611,7 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `node_name`           | string       | —            | Нода Proxmox                                                    |
 | `vm_id`               | number       | `null`       | Явный CTID (`null` — следующий свободный)                       |
 | `cores` / `memory` / `swap` | number | `2` / `2048` / `0` | Ресурсы                                                  |
-| `unprivileged`        | bool         | `false`      | Privileged CT (для GNOME); токену нельзя создать → `ct-recreate.sh` + `terraform import` |
+| `unprivileged`        | bool         | `true`       | `false` — privileged CT (`env/ubuntu`, для GNOME); создать может токен с `Sys.Modify` на `/` |
 | `template_file_id`    | string       | —            | Volume id LXC-шаблона                                           |
 | `os_type`             | string       | `ubuntu`     | Дистрибутив для CT-тулинга Proxmox                              |
 | `datastore_id_rootfs` | string       | `local-lvm`  | Datastore под rootfs                                            |
@@ -613,7 +638,6 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 | `cpu_type`            | string                                 | `host`          | Модель CPU (`host` для passthrough-рабочки)       |
 | `agent_enabled`       | bool                                   | `false`         | Канал QEMU guest agent                            |
 | `on_boot`             | bool                                   | `true`          | Автозапуск на буте (`env/windows` ставит `false` — стартом рулит арбитр) |
-| `hook_script_file_id` | string                                 | `null`          | Volume id хукскрипта. Тоже root@pam-only для VM — `qm set <winid> --hookscript` на ноде |
 | `datastore_id_disk`   | string                                 | `local-lvm`     | Datastore для дисков VM                           |
 | `disk_interface`      | string                                 | `sata0`         | Интерфейс основного диска (`sata0`/`scsi0`)       |
 | `disk_size`           | number                                 | `10`            | Размер диска, ГБ                                  |
@@ -668,7 +692,8 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
 ### LXC (`env/ubuntu`)
 
 - **root@pam-only части конфига CT** — `dev[n]`, `hookscript`, feature-флаги
-  кроме `nesting`. Токен получает 403 (hardcoded в `pve-container`, не роль).
+  (на privileged CT — все, включая `nesting`). Токен получает 403 (hardcoded в
+  `pve-container`, не роль). Сырые `lxc.*` через API не пишутся вовсе.
   Делает `scripts/lxc-ct-passthrough.sh` на ноде. См.
   [отдельный раздел](#rootpam-ограничения-lxc).
 - **Версия драйвера хост == CT.** Модуль ядра `nvidia` (580.178.04) на хосте, в
@@ -688,8 +713,6 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
     DRM-коннекторы; userspace-часть nvidia (`--no-kernel-module`) ставит
     provision внутри CT, версия обязана совпадать с модулем на хосте.
   - `lxc-ct-passthrough.sh` seat-блок:
-    - `unprivileged = 0` (создаёт `scripts/ct-recreate.sh` — токену нельзя,
-      нужен `Sys.Modify` на `/`; потом `terraform import`).
     - `lxc.apparmor.profile: unconfined` — дефолтный + nesting профили режут
       GDM/mutter/logind/snapd.
     - **`lxc.mount.auto: proc:rw sys:rw`** — без записи в `/sys`
@@ -733,8 +756,6 @@ pvesh get /access/roles --output-format json-pretty | grep -A3 '"roleid" : "Terr
   bind-mount `/dev/bus/usb` + `/dev/input` + `/dev/snd` + cgroup major
   189/13/116/166 → все устройства, hotplug. В privileged CT ноды приходят
   `root:root` (не `nobody:nogroup`), + udev-правило `MODE=0666`.
-- **Смена VM → LXC пересоздаёт ресурс** (разные типы, `moved` невозможен). У
-  `env/ubuntu` стейт был пустой (VM-версию не применяли), так что 1 to add.
 
 ## Установка Windows с нуля
 
@@ -758,6 +779,10 @@ OVMF без GOP => на экране установщика ничего не в
 ## Установка Ubuntu с нуля (LXC)
 
 ```bash
+# 00. Права общей роли TerraformProv (разово; Sys.Modify нужен для privileged CT)
+ssh root@bare-pve 'DRY_RUN=1 bash -s' < scripts/pve-role-init.sh   # посмотреть, чего не хватает
+ssh root@bare-pve 'bash -s' < scripts/pve-role-init.sh
+
 # 0. Хост -> режим nvidia (разово, без reboot)
 ssh bare-pve 'NVIDIA_VERSION=580.178.04 bash -s' < scripts/lxc-nvidia-host-setup.sh
 ssh bare-pve nvidia-smi   # NVIDIA GeForce GTX 950
@@ -770,10 +795,11 @@ ssh bare-pve 'cd /root && bash install-gpu-arbiter.sh'
 # 2. Шаблон (обычный minimal rootfs, не cloud)
 ssh bare-pve 'pveam update && pveam download local ubuntu-26.04-standard_26.04-1_amd64.tar.zst'
 
-# 3. Terraform создаёт CT (токеном; только nesting из feature-флагов)
+# 3. Terraform создаёт privileged CT (токеном, остановленным; features не шлёт)
 source scripts/apply-wrapper.sh && terraform -chdir=env/ubuntu apply
 
-# 4. root@pam-биты на ноде: GPU dev[n] + features + hookscript + USB
+# 4. root@pam-биты на ноде: сырые lxc.* (GPU/USB/input/snd/tun/video4linux)
+#    + features + hookscript + apparmor
 ssh bare-pve 'bash /root/lxc-ct-passthrough.sh <ctid>'
 
 # 5. Рестарт -> pre-start хук проверит режим и стартанёт
@@ -789,7 +815,11 @@ ssh bare-pve 'workstation.sh start ubuntu'
 ssh bare-pve 'pct exec <ctid> -- nvidia-smi'
 ```
 
-Мониторы загораются сразу после старта CT (`workstation-session.service`).
+На шаге 3 Proxmox пишет в лог создания `WARN: Systemd 259 detected. You may
+need to enable nesting.` — это ожидаемо: на privileged CT токен `features` не
+шлёт, `nesting=1` ставит `lxc-ct-passthrough.sh` на шаге 4.
+
+После старта CT GDM автологинит в сессию GNOME 50 / Wayland на мониторах.
 Первый раз — при необходимости поправить экраны/Гц в Settings → Displays
 (сохраняется). Пароль
 пользователя по умолчанию — `workstation`, поменять.

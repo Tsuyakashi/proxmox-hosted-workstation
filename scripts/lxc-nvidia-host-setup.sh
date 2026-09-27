@@ -117,8 +117,9 @@ fi
 # 6. Autoload + device nodes without an X server
 # ------------------------------------------------------------
 printf '%s\n' nvidia nvidia_modeset nvidia_uvm nvidia_drm > /etc/modules-load.d/nvidia.conf
-# modeset=1 + fbdev=1: KMS + a real /dev/fb0 and DRM connectors, so an Xorg
-# running INSIDE the CT can become DRM-master and light the physical monitors.
+# modeset=1 + fbdev=1: KMS + a real /dev/fb0 and DRM connectors, so GDM's
+# GNOME 50 / Wayland session (mutter, GBM atomic KMS) INSIDE the CT can become
+# DRM-master and light the physical monitors.
 echo 'options nvidia-drm modeset=1 fbdev=1' > /etc/modprobe.d/nvidia-drm.conf
 cat > /etc/udev/rules.d/70-nvidia.rules <<'EOF'
 KERNEL=="nvidia", RUN+="/usr/bin/nvidia-modprobe -c0"
