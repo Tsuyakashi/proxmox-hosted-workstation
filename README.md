@@ -819,7 +819,7 @@ ssh bare-pve 'pct exec <ctid> -- nvidia-smi'
 need to enable nesting.` — это ожидаемо: на privileged CT токен `features` не
 шлёт, `nesting=1` ставит `lxc-ct-passthrough.sh` на шаге 4.
 
-Мониторы загораются сразу после старта CT (`workstation-session.service`).
+После старта CT GDM автологинит в сессию GNOME 50 / Wayland на мониторах.
 Первый раз — при необходимости поправить экраны/Гц в Settings → Displays
 (сохраняется). Пароль
 пользователя по умолчанию — `workstation`, поменять.

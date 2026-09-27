@@ -68,7 +68,7 @@ module "ubuntu_ct" {
   tags = ["workstation", "gpu", "ubuntu"]
 
   # No features{} block reaches Proxmox for a privileged CT (see mod/ct).
-  # nesting + keyctl + fuse + the GPU/USB dev lines + the hookscript + the
+  # nesting + keyctl + fuse + the raw lxc.* device lines + the hookscript + the
   # apparmor profile are all added on the node by
   # scripts/lxc-ct-passthrough.sh.
 }
