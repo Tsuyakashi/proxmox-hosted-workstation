@@ -14,10 +14,19 @@ Terraform-конфигурация для развёртывания рабоч�
   `apparmor`, `sys:rw`) доводит `scripts/lxc-ct-passthrough.sh` — см.
   [root@pam-ограничения LXC](#rootpam-ограничения-lxc).
 
-Оба варианта нацелены на одно железо и **взаимоисключающи** — см.
+- **`env/macos-tahoe-desktop`** — третье состояние того же железа: полноценная
+  VM (`mod/vm`) с тем же PCI-passthrough, что и `env/windows` (потребляет её
+  `hardware_mapping_pci` через `manage_mappings = false`), но с OpenCore
+  вместо OVMF-Windows-загрузки — hackintosh, macOS Tahoe на физическом GTX
+  950. `scripts/gpu-arbiter.sh`/`scripts/workstation.sh` теперь 3-way
+  (windows/macos/ubuntu). Подробности, честный статус non-Metal-ускорения
+  (OpenCore-Legacy-Patcher, Maxwell) —
+  [`env/macos-tahoe-desktop/README.md`](env/macos-tahoe-desktop/README.md).
+
+Все три варианта нацелены на одно железо и **взаимоисключающи** — см.
 [Архитектура](#архитектура).
 
-Отдельно, независимо от этой пары и от ноды `bare-pve` — **`env/macos-tahoe-headless`**:
+Отдельно, независимо от этой тройки и от ноды `bare-pve` — **`env/macos-tahoe-headless`**:
 headless macOS Tahoe VM (OpenCore, без GPU) на ноде `pve-rog`, backend для
 сборок под Xcode. Не участвует в GPU-мьютексе выше, своя документация в
 [`env/macos-tahoe-headless/README.md`](env/macos-tahoe-headless/README.md).
@@ -35,6 +44,7 @@ headless macOS Tahoe VM (OpenCore, без GPU) на ноде `pve-rog`, backend 
 - [Использование](#использование)
 - [Переменные](#переменные)
 - [Известные ограничения](#известные-ограничения)
+- [macOS Tahoe desktop (env/macos-tahoe-desktop)](#macos-tahoe-desktop-envmacos-tahoe-desktop)
 - [macOS Tahoe headless (env/macos-tahoe-headless)](#macos-tahoe-headless-envmacos-tahoe-headless)
 - [Заметки](#заметки)
 
@@ -791,6 +801,21 @@ Proxmox сам добавляет `kvm=off` + `hv_vendor_id` при `ostype = wi
 ставится без Code 43. Если всё же вылезет —
 `qm set <vmid> -args "-cpu host,kvm=off,hv_vendor_id=whatever,-hypervisor"`
 (bpg-провайдер raw-`args` не поддерживает) или через hookscript.
+
+## macOS Tahoe desktop (env/macos-tahoe-desktop)
+
+Третье состояние `bare-pve`, рядом с `env/windows` и `env/ubuntu` — та же
+физическая GTX 950, тот же `vfio-pci`/`gpu-arbiter.sh`-мьютекс, теперь
+3-way. В отличие от `env/macos-tahoe-headless` (другая нода, без GPU) — это
+реальный passthrough: `mod/vm` (не `mod/vm-headless`), `manage_mappings =
+false` (потребляет `hardware_mapping_pci`, которым владеет `env/windows`),
+`x-vga`/`primary_gpu` для вывода на физический монитор той же схемой, что и
+Windows (`false` на установку — std VGA, `true` после того как система сама
+может рулить картой). Загрузка через OpenCore ISO (`cdrom`), non-Metal
+ускорение для Maxwell — через OpenCore-Legacy-Patcher root-patch поверх
+установленной системы. Полная документация, установка с нуля и честный
+статус (что реально заработало, что нет) —
+[`env/macos-tahoe-desktop/README.md`](env/macos-tahoe-desktop/README.md).
 
 ## macOS Tahoe headless (env/macos-tahoe-headless)
 
