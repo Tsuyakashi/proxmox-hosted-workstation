@@ -169,8 +169,10 @@ variable "password" {
 
 # NOTE: no `hook_script_file_id` / `device_passthrough` variables — Proxmox
 # hard-codes `hookscript:` and `dev[n]:` to root@pam (pve-container
-# src/PVE/LXC.pm), so an API token can never set them. Both are applied on the
-# node by scripts/lxc-ct-passthrough.sh (`pct set --devN` / `--hookscript`).
+# src/PVE/LXC.pm), so an API token can never set them. Devices go in as raw
+# `lxc.mount.entry` + `lxc.cgroup2.devices.allow` lines (not `dev[n]`) and the
+# hookscript via `pct set --hookscript`, both on the node by
+# scripts/lxc-ct-passthrough.sh.
 
 variable "mount_points" {
   description = <<-EOT

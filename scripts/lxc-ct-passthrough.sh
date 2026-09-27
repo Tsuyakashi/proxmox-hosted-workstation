@@ -14,13 +14,14 @@ set -euo pipefail
 # so the API token this project uses gets HTTP 403 no matter the role:
 #   - dev[n]        device passthrough        (LXC.pm:1710)
 #   - hookscript                              (LXC.pm:1761)
-#   - features flags other than `nesting`     (check_ct_modify_config_perm)
-#   - creating a PRIVILEGED CT at all         (needs Sys.Modify on /)
-# The node CLI (`pct create` / `pct set`) runs as root@pam, so it does all of
-# it. env/ubuntu is a PRIVILEGED CT (a real GNOME/GDM desktop needs
-# systemd-logind sessions + udev, which unprivileged Proxmox CTs don't give);
-# Terraform can't create it, so scripts/ct-recreate.sh does, then
-# `terraform import` reconciles state. This script then layers on:
+#   - features flags other than `nesting`     (check_ct_modify_config_perm;
+#     on a PRIVILEGED CT even `nesting` is root@pam)
+# The node CLI (`pct set`) runs as root@pam, so it does all of it.
+# env/ubuntu is a PRIVILEGED CT (a real GNOME/GDM desktop needs
+# systemd-logind sessions + udev, which unprivileged Proxmox CTs don't give).
+# `terraform apply` creates it with the API token (the shared role has
+# Sys.Modify on `/`, see scripts/pve-role-init.sh) and sends no features.
+# This script then layers on:
 #   - features nesting/keyctl/fuse
 #   - lxc.apparmor.profile: unconfined   (GDM/mutter/logind/snapd trip the
 #     default + nesting profiles; single-user box, accepted)
@@ -33,8 +34,8 @@ set -euo pipefail
 # still on vfio-pci a plain start / web-UI Start fails ("Device ... does not
 # exist") and the arbiter never gets to rebind. Raw lxc lines are not
 # pre-validated; the hook (host ns, runs first) creates the nodes, then lxc
-# binds them. Host udev makes the nodes 0666 (unprivileged CT sees bind mounts
-# as nobody:nogroup otherwise).
+# binds them. Host udev makes the nodes 0666 so the CT's seat user (not just
+# root) can open them without per-device group juggling.
 #
 # Re-run after any `terraform apply` that recreates the CT.
 # ============================================================
@@ -86,7 +87,7 @@ DEL=(); for i in $(seq 0 31); do grep -q "^dev${i}:" "$CONF" && DEL+=("dev${i}")
 [ "${#DEL[@]}" -gt 0 ] && echo "  removed ${#DEL[@]} dev[n] entries"
 
 # ------------------------------------------------------------
-# 2. features (keyctl/fuse — nesting is already set by Terraform)
+# 2. features (all of them — Terraform sends none on a privileged CT)
 # ------------------------------------------------------------
 if [ "$MODE" = add ]; then
   pct set "$CTID" --features "$FEATURES" >/dev/null
@@ -112,21 +113,26 @@ else
 fi
 
 # ------------------------------------------------------------
-# 4. Raw lxc.* — things dev[n] can't express:
+# 4. Raw lxc.* seat block — GPU nodes (see section 1), plus:
 #    - USB / input / sound *directories* + webcam video4linux nodes + tun
 #      (bind + cgroup major ranges)
-#    - the physical seat: framebuffer + tty7 so an Xorg inside the CT can
-#      become DRM-master and light the monitors. NEVER bind /dev/console,
-#      /dev/tty0, or the getty ttys (tty1/tty2) — LXC / Proxmox own those and
-#      binding them fails the container with `sync_wait: 34`. tty7 + fb0 +
-#      vga_arbiter are enough (Xorg runs -keeptty -novtswitch).
+#    - the physical seat: framebuffer + tty7 so GDM's GNOME 50 / Wayland
+#      session (mutter, via logind) can become DRM-master and light the
+#      monitors. NEVER bind /dev/console, /dev/tty0, or the getty ttys
+#      (tty1/tty2) — LXC / Proxmox own those and binding them fails the
+#      container with `sync_wait: 34`. tty7 + fb0 + vga_arbiter are enough.
 #    A duplicated block (old marker not stripped) triggers the SAME
 #    `sync_wait: 34` — hence the ':'-free markers above.
+#    `pct set` (steps 2/3) rewrites the conf and hoists every `#` line to the
+#    top as the description, detaching the markers from the lxc.* lines they
+#    wrapped — so the marker range alone would leave the old lxc.* lines
+#    behind. This script is the only writer of lxc.* here: drop them all.
 # ------------------------------------------------------------
 tmp=$(mktemp)
 awk -v br="$STRIP_BEGIN_RE" -v er="$STRIP_END_RE" '
   $0 ~ br {drop=1; next}
   $0 ~ er {drop=0; next}
+  $0 ~ /^lxc\./ {next}
   drop==0 {print}' "$CONF" >"$tmp"
 if [ "$MODE" = add ] && [ "$WITH_USB" = 1 ]; then
   cat >>"$tmp" <<EOF
@@ -138,7 +144,7 @@ lxc.apparmor.profile: unconfined
 # Writable /sys so systemd-udevd can coldplug (udevadm trigger needs to write
 # .../uevent). Without it the udev DB stays empty -> libinput sees nothing,
 # and logind's seat0 has no DRM device so a Wayland compositor can't get
-# master. With it, `loginctl seat-status seat0` shows [MASTER] drm:card0 and
+# master. With it, "loginctl seat-status seat0" shows [MASTER] drm:card0 and
 # GNOME/Wayland just works. (proc:rw is the Proxmox default; restated here.)
 lxc.mount.auto: proc:rw sys:rw
 # GPU: nvidia (195), drm (226), nvidia-caps (236). nvidia-uvm's major is
@@ -195,7 +201,7 @@ lxc.mount.entry: /dev/video0 dev/video0 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/video1 dev/video1 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/video2 dev/video2 none bind,optional,create=file 0 0
 lxc.mount.entry: /dev/video3 dev/video3 none bind,optional,create=file 0 0
-# Only tty7 for the seat Xorg (runs -keeptty -novtswitch). NEVER bind
+# Only tty7 for the seat (GDM / GNOME Wayland). NEVER bind
 # /dev/console, /dev/tty0, or the getty ttys tty1/tty2 (Proxmox tty: 2) --
 # binding those fails the container at spawn (sync_wait: 34).
 lxc.mount.entry: /dev/tty7 dev/tty7 none bind,optional,create=file 0 0
@@ -205,7 +211,7 @@ fi
 cmp -s "$tmp" "$CONF" || { cat "$tmp" >"$CONF"; echo "  raw lxc.* seat block: ${MODE}"; }
 rm -f "$tmp"
 
-# host udev perms — an unprivileged CT sees bind-mounted nodes as nobody:nogroup
+# host udev perms — 0666 so the seat user in the CT can open the bind-mounted nodes
 UDEV=/etc/udev/rules.d/99-lxc-workstation-perms.rules
 if [ "$MODE" = add ] && [ "$WITH_USB" = 1 ]; then
   cat >"$UDEV" <<'EOF'
