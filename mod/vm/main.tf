@@ -151,6 +151,6 @@ resource "proxmox_virtual_environment_vm" "this" {
     #   create, same as mod/ct's own `started` -- the provider's schema
     #   default (true) otherwise drifts against a guest that's meant to be
     #   off, and a stray apply would actually power it on.
-    ignore_changes = [hook_script_file_id, started]
+    ignore_changes = [hook_script_file_id, started, machine]
   }
 }
