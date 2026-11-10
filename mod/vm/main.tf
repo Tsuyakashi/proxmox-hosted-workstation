@@ -151,6 +151,11 @@ resource "proxmox_virtual_environment_vm" "this" {
     #   create, same as mod/ct's own `started` -- the provider's schema
     #   default (true) otherwise drifts against a guest that's meant to be
     #   off, and a stray apply would actually power it on.
+    # machine: for Windows ostypes Proxmox pins the versioned machine type at
+    #   create (e.g. pc-q35-11.0+pve2). Without this every apply resets it to
+    #   bare "q35" (= latest), and Windows sees a chipset change on next boot
+    #   (re-detection, possible re-activation). Confirmed on env/windows-amd-pve
+    #   (2026-11-10). Bump the pin deliberately via `qm set --machine` instead.
     ignore_changes = [hook_script_file_id, started, machine]
   }
 }

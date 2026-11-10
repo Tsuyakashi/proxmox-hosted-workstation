@@ -12,6 +12,8 @@ module "minimal_vm" {
   disk_interface = "sata0"
   disk_size      = 60
 
+  # Lifecycle via gpu-arbiter.sh hookscript (qm set 108 --hookscript ...) /
+  # workstation.sh — shares the GPU with the ubuntu CT on this node.
   on_boot = false
 
   # amd-pve: AMD A4-5300 + FCH (Family 15h). Groups verified with:
@@ -24,6 +26,7 @@ module "minimal_vm" {
   #   group 7: 00:14.5 OHCI                 (stays with host)
   #
   # Host keeps SATA (group 2) and the Realtek NIC (group 1, vmbr0) + USB on 13.x/14.5.
+  # Arbiter side of the same list: host/amd-pve/gpu-arbiter.conf.
   #
   # Mapping names are cluster-wide and env/windows (bare-pve) already owns
   # gtx950/usb-*/onboard-audio — hence the amd- prefix.
@@ -34,16 +37,14 @@ module "minimal_vm" {
       id           = "10de:1402"
       subsystem_id = "10de:1402"
       iommu_group  = 0
-      # GTX 950 has no UEFI GOP: keep false for install (std VGA + noVNC),
-      # flip true once Windows + the NVIDIA driver are in.
-      primary_gpu = var.gpu_primary
+      primary_gpu  = var.gpu_primary
     },
     {
       name         = "amd-usb12"
       path         = "0000:00:12" # function-less -> 00:12.0 (OHCI) + 00:12.2 (EHCI companion pair)
       id           = "1022:7807"
+      subsystem_id = "1849:7807" # Proxmox validates it against 00:12.0 — mandatory
       iommu_group  = 3
-      subsystem_id = "1849:7807"
     },
   ]
 }

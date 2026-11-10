@@ -29,8 +29,9 @@ variable "proxmox_api_token" {
 }
 
 variable "vm_name" {
-  type    = string
-  default = "windows-workstation"
+  description = "Must match WIN_NAME in gpu-arbiter.sh (default windows-workstation)."
+  type        = string
+  default     = "windows-workstation"
 }
 
 variable "cores" {
@@ -53,13 +54,15 @@ variable "agent_enabled" {
 
 variable "iso_file_id" {
   description = <<-EOT
-    Installer ISO on amd-pve's OWN local storage (node-local, not shared):
+    Installer ISO on amd-pve's OWN local storage (node-local, not shared).
+    null = empty drive (installed state). For a from-scratch reinstall:
       scp Win10_22H2_Russian_x64v1.iso amd-pve:/var/lib/vz/template/iso/
-    Set to null after install to empty the drive.
+      terraform apply -var iso_file_id=local:iso/Win10_22H2_Russian_x64v1.iso -var gpu_primary=false
+    Note: -var passes strings literally — "null" on the CLI is the string
+    "null", not null; leave the var unset instead.
   EOT
   type        = string
   default     = null
-  # default   = "local:iso/Win10_22H2_Russian_x64v1.iso"
 }
 
 variable "mac" {
@@ -75,9 +78,12 @@ variable "os_type" {
 
 variable "gpu_primary" {
   description = <<-EOT
-    x-vga on the GTX 950. false for install: OVMF has no GOP for this card,
-    so with x-vga the installer is blind — std VGA + noVNC until the NVIDIA
-    driver is in. Then flip to true and `qm stop && qm start`.
+    x-vga on the GTX 950 — primary display on the physical monitor.
+    Default true: Windows + NVIDIA driver are installed. Set false only for a
+    from-scratch reinstall: the card has no UEFI GOP, so with x-vga the
+    OVMF/installer screen is blind — std VGA + noVNC until the NVIDIA driver
+    is in. Changing it needs a full QEMU restart (qm shutdown && qm start),
+    not a guest reboot.
   EOT
   type        = bool
   default     = true

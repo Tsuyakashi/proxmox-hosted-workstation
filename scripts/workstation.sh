@@ -6,7 +6,7 @@ set -uo pipefail
 # ============================================================
 #
 # The switch + lock ENGINE lives in scripts/gpu-arbiter.sh (also wired as a
-# Proxmox hookscript on all three guests, so `qm start` / `pct start` / the
+# Proxmox hookscript on the guests, so `qm start` / `pct start` / the
 # web-UI Start button already do the right thing on their own).
 #
 # This wrapper adds the conveniences a hookscript can't:
@@ -16,8 +16,13 @@ set -uo pipefail
 #   stop  [g]                    shut guest(s) down, start nothing
 #   switch <g> [--via-reboot]    swap drivers only
 #
-# All three guests default OFF (on_boot=false / start_on_boot=false). Stopping
+# All guests default OFF (on_boot=false / start_on_boot=false). Stopping
 # one never starts another. Run as root on the Proxmox host.
+
+# Same per-node config as the arbiter — guest names must agree with it.
+ARBITER_CONF="${ARBITER_CONF:-/etc/default/gpu-arbiter}"
+# shellcheck disable=SC1090
+[ -r "$ARBITER_CONF" ] && . "$ARBITER_CONF"
 
 WIN_NAME="${WIN_NAME:-windows-workstation}"
 MACOS_NAME="${MACOS_NAME:-macos-workstation}"
