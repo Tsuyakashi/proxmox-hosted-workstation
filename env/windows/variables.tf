@@ -1,35 +1,11 @@
 variable "proxmox_node" {
-  description = "Default target Proxmox node, bare-pve in default"
-  type        = string
-  default     = "bare-pve"
-}
-
-variable "proxmox_endpoints" {
-  type = map(string)
-  default = {
-    "bare-pve" = "https://192.168.100.30:8006/"
-    "pve-rog"  = "https://192.168.100.20:8006/"
-  }
-}
-
-locals {
-  proxmox_endpoint = var.proxmox_endpoints[var.proxmox_node]
-  node_name        = var.proxmox_node
-}
-
-variable "proxmox_insecure" {
-  type    = bool
-  default = true
+  type    = string
+  default = "bare-pve"
 }
 
 variable "proxmox_api_token" {
   type      = string
   sensitive = true
-}
-
-variable "vm_name" {
-  type    = string
-  default = "windows-workstation"
 }
 
 variable "cores" {
@@ -38,44 +14,43 @@ variable "cores" {
 }
 
 variable "memory" {
-  type    = number
-  default = 12288
+  description = "MiB. Same as the Ubuntu CT: they never run at the same time."
+  type        = number
+  default     = 12288
 }
 
-variable "agent_enabled" {
-  description = "Enable QEMU guest agent channel. Flip to true only after virtio guest tools are installed in Windows."
+variable "games_ssd_size" {
+  description = "GiB, shared game disk on local-lvm (SSD). Grow only; then extend the volume in Windows."
+  type        = number
+  default     = 100
+}
+
+variable "games_hdd_size" {
+  description = "GiB, shared game disk on the hdd thin pool (sdb). Grow only."
+  type        = number
+  default     = 200
+}
+
+variable "protection" {
+  description = "Proxmox protection flag on the VM. Clear it deliberately before any destroy/replace."
+  type        = bool
+  default     = true
+}
+
+variable "iso_file_id" {
+  description = "Installer ISO in the CD drive; null = no CD drive."
+  type        = string
+  default     = "local:iso/Win10_22H2_Russian_x64v1.iso"
+}
+
+variable "gpu_primary" {
+  description = "x-vga on the card (output to the monitor). false only until Windows + the NVIDIA driver are installed."
   type        = bool
   default     = false
 }
 
-variable "iso_file_id" {
-  description = <<-EOT
-    Volume ID of an ISO to mount in the (empty) CD drive. null keeps the drive
-    empty — set it back to "local:iso/Win10_22H2_Russian_x64v1.iso" only for a
-    from-scratch reinstall.
-  EOT
-  type        = string
-  default     = null
-}
-
-variable "mac" {
-  type    = string
-  default = "BC:24:11:F9:5D:82"
-}
-
-variable "os_type" {
-  type    = string
-  default = "win10"
-}
-
-variable "gpu_primary" {
-  description = <<-EOT
-    x-vga on the GTX 950 — primary display on the physical monitor(s).
-    Default true now that Windows + the NVIDIA driver are installed. Set to
-    false only for a from-scratch reinstall: OVMF has no GOP for this card, so
-    with x-vga the OVMF/installer screen is blind — you need the emulated std
-    VGA primary and the noVNC console until the NVIDIA driver is in.
-  EOT
+variable "agent_enabled" {
+  description = "QEMU guest agent channel. true only after the virtio guest tools are installed in Windows."
   type        = bool
-  default     = true
+  default     = false
 }

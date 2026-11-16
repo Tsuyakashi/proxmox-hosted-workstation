@@ -56,6 +56,19 @@ HOOK="local:snippets/gpu-arbiter.sh"
 CONF="/etc/pve/lxc/${CTID}.conf"
 [ -f "$CONF" ] || { echo "error: $CONF not found (is the CT created?)" >&2; exit 1; }
 
+# Shared game disks (gpu-arbiter mounts them on the host at
+# $SHARED_MNT_ROOT/<label> before the CT starts): plain directory binds.
+# Labels come from the arbiter's per-node config.
+# shellcheck disable=SC1091
+[ -r /etc/default/gpu-arbiter ] && . /etc/default/gpu-arbiter
+shared_mount_lines() {
+  local l
+  echo "# shared game disks (NTFS, mounted on the host by gpu-arbiter pre-start)"
+  for l in ${SHARED_LABELS:-}; do
+    echo "lxc.mount.entry: ${SHARED_MNT_ROOT:-/mnt/shared}/$l mnt/$l none bind,optional,create=dir 0 0"
+  done
+}
+
 # Markers must contain NO ':' — Proxmox url-encodes it to %3A when it rewrites
 # the conf, so a ':'-bearing marker won't match on the next run, the old block
 # isn't stripped, and a SECOND copy gets appended. Two identical lxc.mount.entry
@@ -205,6 +218,7 @@ lxc.mount.entry: /dev/video3 dev/video3 none bind,optional,create=file 0 0
 # /dev/console, /dev/tty0, or the getty ttys tty1/tty2 (Proxmox tty: 2) --
 # binding those fails the container at spawn (sync_wait: 34).
 lxc.mount.entry: /dev/tty7 dev/tty7 none bind,optional,create=file 0 0
+$(shared_mount_lines)
 $END
 EOF
 fi
@@ -234,3 +248,4 @@ fi
 
 echo ""
 echo ">>> (re)start the CT:  pct reboot $CTID   or   workstation.sh start ubuntu"
+
