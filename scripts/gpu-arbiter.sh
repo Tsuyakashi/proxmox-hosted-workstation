@@ -67,7 +67,11 @@ GPU_AUD="${GPU_AUD:-0000:01:00.1}"
 # UCSI). They sit in the GPU's IOMMU group, so they move with it; any class.
 read -r -a GPU_EXTRA <<<"${GPU_EXTRA:-}"
 read -r -a USB_FUNCS <<<"${USB_FUNCS:-0000:00:14.0 0000:00:1d.0 0000:00:1a.0 0000:00:1b.0}"
-NVIDIA_NODES=(/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-modeset /dev/dri/card0 /dev/dri/renderD128)
+# DRM nodes go by PCI path, not by number: simpledrm (UEFI framebuffer) can
+# grab card0 at boot, and the GPU then comes up as card1. The CT gets the
+# whole /dev/dri, so whichever number it has is what the CT sees.
+NVIDIA_NODES=(/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-modeset
+              "/dev/dri/by-path/pci-${GPU_VGA}-card" "/dev/dri/by-path/pci-${GPU_VGA}-render")
 
 # Shared game disks: the Windows VM's data disks, NTFS, used by the Ubuntu CT
 # whenever Windows is off. SHARED_DISK_SLOTS are disk slots in the Windows
@@ -218,8 +222,16 @@ switch_to_ubuntu() {
   #    `-a`: without it modprobe treats nvidia_uvm / nvidia_modeset as kernel
   #    params to `nvidia` and silently drops them ("unknown parameter ... ignored").
   modprobe -a nvidia nvidia_uvm nvidia_modeset 2>/dev/null || true
-  modprobe -r nvidia_drm 2>/dev/null || true
-  modprobe nvidia_drm modeset=1 fbdev=1 2>/dev/null || modprobe nvidia_drm 2>/dev/null || true
+  # nvidia_drm needs modeset=1 (+ fbdev for /dev/fb0). NEVER unload it once
+  # it is in: with a console on the card, `modprobe -r nvidia_drm` waits for
+  # the display engine to idle, and after the GPU has been in a VM that can
+  # hang in the kernel for good ("Idling display engine timed out", rmmod in
+  # D state, only a reboot helps). Reload only when it is absent or was
+  # loaded without modeset (an unused console-less load unloads fine).
+  if [ "$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null)" != Y ]; then
+    [ -d /sys/module/nvidia_drm ] && modprobe -r nvidia_drm 2>/dev/null
+    modprobe nvidia_drm modeset=1 fbdev=1 2>/dev/null || modprobe nvidia_drm 2>/dev/null || true
+  fi
   modprobe -a snd_hda_intel xhci_pci ehci_pci ohci_pci 2>/dev/null || true
   # 3. bind
   bind_to "$GPU_VGA" nvidia || rc=1
