@@ -40,13 +40,13 @@ variable "protection" {
 variable "iso_file_id" {
   description = "Installer ISO in the CD drive; null = no CD drive."
   type        = string
-  default     = "local:iso/Win10_22H2_Russian_x64v1.iso"
+  default     = "none"
 }
 
 variable "gpu_primary" {
   description = "x-vga on the card (output to the monitor). false only until Windows + the NVIDIA driver are installed."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "agent_enabled" {
