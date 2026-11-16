@@ -391,9 +391,14 @@ hook_prestart() { # $1 = vmid
 # ---- Proxmox hook: post-stop (CT only) --------------------------------
 # Releases the shared game disks once the CT is down. Not a chain: nothing
 # else is started.
+#
+# NO LOCK here. workstation.sh holds the lock while it stops the CT, and
+# lxc-stop does not return until this hook has finished: waiting for the
+# lock would deadlock both (the CT hangs as "running" without a PID). No
+# lock is needed either: the CT is down, and its next pre-start cannot run
+# before this hook returns; a Windows pre-start unmounts again under the lock.
 hook_poststop() { # $1 = vmid
   [ -f "/etc/pve/lxc/${1}.conf" ] || return 0
-  take_lock
   log "post-stop: vmid=$1 (ubuntu), releasing shared game disks"
   shared_umount || log "post-stop: shared disks still mounted — the next Windows start will refuse"
 }
