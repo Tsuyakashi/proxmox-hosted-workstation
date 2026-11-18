@@ -190,9 +190,10 @@ systemctl mask apparmor.service tpm-udev.path tpm-udev.service \
 # The GPU/USB/input nodes are bind-mounted in by LXC and fire no uevents
 # inside the CT, so systemd-udevd's DB starts empty -> libinput sees nothing
 # and logind's seat0 has no DRM. A coldplug re-trigger (writable /sys, from
-# lxc-ct-passthrough.sh) fixes both. Also mark card0 master-of-seat.
+# lxc-ct-passthrough.sh) fixes both. Also mark the NVIDIA card master-of-seat
+# (matched by driver: simpledrm can take card0 on the host, the GPU is card1 then).
 cat >/etc/udev/rules.d/99-workstation-seat.rules <<'EOF'
-SUBSYSTEM=="drm", KERNEL=="card0", TAG+="seat", TAG+="master-of-seat"
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", DRIVERS=="nvidia", TAG+="seat", TAG+="master-of-seat"
 SUBSYSTEM=="usb", MODE="0666"
 SUBSYSTEM=="input", MODE="0664", GROUP="input"
 KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
@@ -380,10 +381,10 @@ fi
 # ------------------------------------------------------------
 echo ""
 echo "=== checks ==="
-ls -l /dev/dri/card0 /dev/nvidia0 /dev/fb0 2>&1 || echo "!! seat nodes missing — re-run lxc-ct-passthrough.sh, restart CT"
+ls -l /dev/dri/card* /dev/nvidia0 /dev/fb0 2>&1 || echo "!! seat nodes missing — re-run lxc-ct-passthrough.sh, restart CT"
 nvidia-smi -L 2>&1 || echo "!! nvidia-smi failed (host/CT driver mismatch?)"
 findmnt -no OPTIONS /sys | grep -q '^rw' && echo "/sys is rw (udev ok)" || echo "!! /sys is ro — add lxc.mount.auto sys:rw (lxc-ct-passthrough.sh)"
-loginctl seat-status seat0 2>&1 | grep -q 'drm:card0' && echo "seat0 has drm:card0 (Wayland can take master)" || echo "!! seat0 has no DRM — check /sys rw + workstation-coldplug"
+loginctl seat-status seat0 2>&1 | grep -q 'drm:card' && echo "seat0 has the DRM card (Wayland can take master)" || echo "!! seat0 has no DRM — check /sys rw + workstation-coldplug"
 echo "gnome-shell: $(dpkg-query -W -f='${Version}' gnome-shell 2>/dev/null || echo MISSING)"
 echo "gdm autologin: $(grep -c "AutomaticLogin=${SEAT_USER}" /etc/gdm3/custom.conf)"
 echo "wayland session: $(ls /usr/share/wayland-sessions/ 2>/dev/null | tr '\n' ' ')"
@@ -395,3 +396,4 @@ echo "Remote:  xfreerdp3 /v:<ct-ip> /u:${SEAT_USER} /p:<pw> /cert:ignore /f /sma
 echo "         (g-r-d RDP :3389 NVENC; /f + /smart-sizing fixes client-scale window sizing;"
 echo "          over the tailnet: 'tailscale serve --bg --tcp 3389 tcp://<ct-ip>:3389' on the jump host)"
 echo "Logs:    journalctl -b -u gdm ; journalctl -b _COMM=gnome-shell"
+

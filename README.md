@@ -475,38 +475,72 @@ ssh bare-pve /usr/local/sbin/workstation.sh switch ubuntu --via-reboot
 > это просто метаданные, Proxmox сверяет их только при старте VM. «Свап
 > маппинга» на практике = смена драйвера PCI-функций на хосте.
 
-## Секреты и Vault
+## Общие игровые диски
 
-Секреты не хранятся в репозитории (`.gitignore` исключает `terraform.tfvars`
-и файлы состояния). Используется `scripts/apply-wrapper.sh`, который перед
-`terraform apply`/`plan` подтягивает из Vault:
+Steam-библиотеки доступны и из Windows, и из Ubuntu — из той ОС, что сейчас
+запущена. Это диски Windows-VM, а Ubuntu-CT получает их через хост:
 
-- `proxmox/terraform-provider` → `TF_VAR_proxmox_api_token`
-- `minio/credentials` → `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
-  (для S3 backend)
+| Диск VM | Storage | Размер | Метка NTFS | В CT |
+|---|---|---|---|---|
+| `sata1` | `local-lvm` (SSD) | `games_ssd_size` = 100 ГиБ | `games-ssd` | `/mnt/games-ssd` |
+| `sata2` | `hdd` (WD Red, `sdb`) | `games_hdd_size` = 200 ГиБ | `games-hdd` | `/mnt/games-hdd` |
 
-Использование обёртки:
+- **Владеет дисками Windows-VM.** Они создаются вместе с ней, а `protection`
+  не даёт удалить VM вместе с библиотеками.
+- **`gpu-arbiter.sh` переключает их вместе с GPU.** `pre-start` Ubuntu: после
+  свопа GPU хост делает `kpartx` на томах, находит NTFS-разделы по меткам и
+  монтирует `ntfs3` в `/mnt/shared/<метка>` (`uid=1000`); CT получает их
+  bind-mount'ом (`lxc-ct-passthrough.sh`). `post-stop` Ubuntu — размонтирует.
+  `pre-start` Windows — размонтирует, и если том занят, **старт Windows
+  отменяется**: одновременно писать в NTFS из двух ОС = порча.
+- **Пустые точки монтирования на хосте immutable** (`chattr +i`): если том не
+  смонтировался, Steam в CT не сможет случайно писать в rootfs хоста.
+- **Fast Startup в Windows выключить** (`powercfg /h off` от админа). Иначе
+  Windows «выключается» гибернацией, NTFS остаётся грязным, и `ntfs3` его не
+  монтирует (в логе арбитра будет `mount ... FAILED`).
+- **Proton-префиксы (`steamapps/compatdata`) в Ubuntu — на ext4.** NTFS не
+  умеет `:` в именах файлов. В каждой библиотеке на общем диске:
+  `compatdata` → симлинк в `~/.local/share/Steam/compatdata-<метка>`.
+- Рост: увеличить `games_*_size` → `terraform apply` → «Расширить том» в
+  управлении дисками Windows. Уменьшать нельзя.
+
+Первичная разметка — один раз из Windows: управление дисками → GPT → NTFS,
+метки `games-ssd` и `games-hdd`. Проверка с хоста:
 
 ```bash
-source scripts/apply-wrapper.sh   # подключает функцию terraform() с автоподгрузкой секретов
-vault login -method=userpass username=<you>
-terraform -chdir=env/windows apply
+ssh bare-pve /var/lib/vz/snippets/gpu-arbiter.sh status   # секция shared game disks
+tail /var/log/gpu-arbiter.log
 ```
+
+## Секреты и Vault
+
+Секреты не хранятся в репозитории. `env/windows` и `env/ubuntu` получают их из
+[`tf-secrets`](https://github.com/Tsuyakashi/tools-sandbox/tree/main/tf-secrets)
+(рецепт `pve`) при первом `terraform` в шелле:
+
+- `proxmox/terraform-provider` → `TF_VAR_proxmox_api_token`
+- `proxmox/ssh-keys` → `TF_VAR_ssh_public_keys` (root в Ubuntu-CT)
+- `s3/terraform` → `AWS_*` для бэкенда (Silo, `svc:s3`, бакет
+  `proxmox-hosted-workstation-tfstate`, lockfile)
+
+`scripts/apply-wrapper.sh` остался для `macos-*` (старые `mod/*`).
 
 ## Использование
 
-Terraform только **создаёт** гостей (обоих можно держать созданными
-одновременно — они выключены). Запуск/остановку/своп железа делает
-`scripts/workstation.sh` — см. [Переключение ОС](#переключение-ос-lock).
+Terraform только **создаёт** гостей (оба созданы и выключены). Запуск,
+остановку и своп железа делает `scripts/workstation.sh` — см.
+[Переключение ОС](#переключение-ос-lock).
+
+`env/windows` и `env/ubuntu` собраны на общих модулях
+[`iac-proxmox-lab/modules`](https://github.com/Tsuyakashi/iac-proxmox-lab/tree/main/modules)
+(`pve-vm`, `pve-ct`, `pve-nodes`) по тегу `modules/v0.2.0`; API — `svc:pve`.
+`mod/vm`, `mod/ct`, `mod/vm-headless` в этой репе живут только для `macos-*`.
 
 ```bash
-source scripts/apply-wrapper.sh
-vault login -method=userpass username=<you>
+terraform -chdir=env/windows init && terraform -chdir=env/windows apply   # маппинги + VM + диски
+terraform -chdir=env/ubuntu  init && terraform -chdir=env/ubuntu  apply   # privileged LXC
 
-terraform -chdir=env/windows init && terraform -chdir=env/windows apply   # создать VM
-terraform -chdir=env/ubuntu  init && terraform -chdir=env/ubuntu  apply   # создать LXC
-
-ssh bare-pve scripts/workstation.sh start windows    # запустить одну из них
+ssh bare-pve /usr/local/sbin/workstation.sh start windows    # запустить одну из них
 ```
 
 ### Права токена Terraform
@@ -560,48 +594,37 @@ ssh root@bare-pve 'bash -s' < scripts/pve-role-init.sh
 
 ### `env/windows`
 
-| Переменная               | Тип         | По умолчанию               | Описание                                  |
-|---------------------------|-------------|-----------------------------|---------------------------------------------|
-| `proxmox_node`             | string      | `bare-pve`                  | Целевая нода Proxmox                        |
-| `proxmox_endpoints`        | map(string) | —                            | Карта `нода → endpoint API`                 |
-| `proxmox_insecure`         | bool        | `true`                       | Пропускать проверку TLS-сертификата         |
-| `proxmox_api_token`        | string      | — (sensitive)                | API-токен `terraform@pve`                   |
-| `vm_name`                  | string      | `windows-workstation`        | Имя VM                                      |
-| `cores`                    | number      | `4`                          | Количество ядер CPU                         |
-| `memory`                   | number      | `12288`                      | RAM, МБ                                     |
-| `mac`                      | string      | `BC:24:11:F9:5D:82`          | MAC-адрес сетевого интерфейса               |
-| `os_type`                  | string      | `win10`                      | Тип гостевой ОС (`win10`, `win11`, `l26`)   |
-| `agent_enabled`            | bool        | `false`                      | QEMU guest agent (включать после установки virtio-тулзов) |
-| `iso_file_id`              | string      | `null`                       | Volume ID ISO (`null` — пустой привод; `local:iso/Win10_22H2_...` только на переустановку) |
+| Переменная          | По умолчанию | Описание |
+|---|---|---|
+| `proxmox_node`      | `bare-pve` | Нода |
+| `proxmox_api_token` | — (sensitive) | API-токен `terraform@pve` |
+| `cores` / `memory`  | `4` / `12288` | Как у Ubuntu-CT: вместе не запускаются |
+| `games_ssd_size`    | `100` | ГиБ, общий игровой диск на `local-lvm` (sata1). Только рост |
+| `games_hdd_size`    | `200` | ГиБ, общий игровой диск на `hdd` (sata2). Только рост |
+| `protection`        | `true` | Флаг защиты VM в Proxmox: без его снятия VM и диски не удалить |
+| `iso_file_id`       | `local:iso/Win10_22H2_Russian_x64v1.iso` | ISO установщика; `null` — без CD-привода |
+| `gpu_primary`       | `false` | `x-vga` на карте. `false` только до установки драйвера NVIDIA |
+| `agent_enabled`     | `false` | Guest agent, после установки virtio-тулзов |
 
-`env/windows` передаёт в `mod/vm` `on_boot = false` — стартом управляет
-`scripts/workstation.sh`, автозапуска на буте нет.
+Фиксировано в `main.tf`: имя `windows-workstation` (по нему арбитр узнаёт
+VM), `on_boot = false`, `started = false`, CPU `host`, все диски SATA, NIC
+`e1000`, MAC `BC:24:11:F9:5D:82`. PCI-маппинги (`gtx1660s`, `usb-xhci`,
+`usb-ehci1`, `usb-ehci2`, `onboard-audio`) — `hardware.tf`.
 
 ### `env/ubuntu` (LXC)
 
-| Переменная          | Тип          | По умолчанию                                            | Описание                                       |
-|---------------------|--------------|--------------------------------------------------------|------------------------------------------------|
-| `proxmox_node`      | string       | `bare-pve`                                              | Целевая нода Proxmox                            |
-| `proxmox_endpoints` | map(string)  | —                                                      | Карта `нода → endpoint API`                     |
-| `proxmox_insecure`  | bool         | `true`                                                  | Пропускать проверку TLS-сертификата             |
-| `proxmox_api_token` | string       | — (sensitive)                                           | API-токен `terraform@pve`                       |
-| `ct_name`           | string       | `ubuntu-workstation`                                    | Hostname контейнера                             |
-| `cores`             | number       | `4`                                                    | Ядра CPU                                        |
-| `memory`            | number       | `12288`                                                 | RAM, МиБ (как у `env/windows` — вместе не запускаются) |
-| `swap`              | number       | `0`                                                    | Swap, МиБ                                       |
-| `unprivileged`      | bool         | `false`                                                 | **Privileged** — GNOME/GDM нужна graphical logind-сессия + udev |
-| `template_file_id`  | string       | `local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst` | LXC-шаблон (minimal rootfs, **не** cloud); `pveam download local <...>` |
-| `disk_size`         | number       | `64`                                                   | rootfs, ГиБ                                     |
-| `mac`               | string       | `BC:24:11:AB:CD:01`                                     | MAC (отличается от windows)                     |
-| `ipv4_address`      | string       | `dhcp`                                                  | `dhcp` или статический CIDR                     |
-| `ipv4_gateway`      | string       | `null`                                                  | Шлюз для статического адреса                    |
-| `ssh_public_keys`   | list(string) | `[]`                                                    | Ключи root внутри CT                            |
+| Переменная          | По умолчанию | Описание |
+|---|---|---|
+| `proxmox_node`      | `bare-pve` | Нода |
+| `proxmox_api_token` | — (sensitive) | API-токен `terraform@pve` |
+| `ssh_public_keys`   | `[]` (tf-secrets) | Ключи root в CT |
+| `template_file_id`  | `local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst` | Minimal rootfs, не cloud |
+| `cores` / `memory`  | `4` / `12288` | |
+| `disk_size`         | `64` | rootfs, ГиБ. Игры — на общих дисках, Proton-префиксы — тут |
 
-`env/ubuntu` жёстко задаёт `start_on_boot = false` и `started = false`;
-`features` (privileged CT) не шлёт. GPU-ноды, `hookscript`,
-`nesting`/`keyctl`/`fuse`, USB/input/sound — всё через
-`scripts/lxc-ct-passthrough.sh` на ноде (root@pam-only, см.
-[root@pam-ограничения LXC](#rootpam-ограничения-lxc)).
+Фиксировано: hostname `ubuntu-workstation`, privileged, `start_on_boot` и
+`started` = `false`, DHCP, MAC `BC:24:11:AB:CD:01`, DNS `192.168.100.1 1.1.1.1`.
+Всё root@pam-only — `scripts/lxc-ct-passthrough.sh` на ноде.
 
 ### `mod/ct`
 
@@ -864,3 +887,4 @@ OpenCore-загрузчик через `cdrom`. Полная документа�
   в каждом ресурсе.
 - Ресурс `proxmox_virtual_environment_hardware_mapping_pci` **deprecated**
   в версии 0.111.1 — используйте `proxmox_hardware_mapping_pci`.
+

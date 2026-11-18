@@ -5,8 +5,8 @@ set -uo pipefail
 # gpu-arbiter.sh — Proxmox guest hookscript + GPU/USB driver-swap engine
 # ============================================================
 #
-# bare-pve has ONE discrete GPU + one set of USB controllers, shared by THREE
-# MUTUALLY-EXCLUSIVE guests:
+# A workstation node has ONE discrete GPU + a set of USB controllers, shared
+# by up to THREE MUTUALLY-EXCLUSIVE guests:
 #
 #   windows -> PCI-passthrough VM   GPU + USB functions on vfio-pci
 #   macos   -> PCI-passthrough VM   GPU + USB functions on vfio-pci (same mode
@@ -17,15 +17,19 @@ set -uo pipefail
 #   ubuntu  -> LXC container        GPU on nvidia, USB on native drivers
 #                                   (/dev subtrees shared into the CT)
 #
+# Per-node addresses (GPU_VGA / GPU_AUD / USB_FUNCS / guest names) come from
+# /etc/default/gpu-arbiter (repo: host/<node>/gpu-arbiter.conf). Built-in
+# defaults below are bare-pve's (Intel 8-series).
+#
 # This script is the single implementation of the switch + the "one OS at a
 # time" lock. It is used two ways:
 #
-#   1. As a Proxmox hookscript on ALL THREE guests (native mechanism):
+#   1. As a Proxmox hookscript on the guests (native mechanism):
 #        qm  set <winid> --hookscript local:snippets/gpu-arbiter.sh
 #        qm  set <macid> --hookscript local:snippets/gpu-arbiter.sh
 #        pct set <ctid>  --hookscript local:snippets/gpu-arbiter.sh
 #      Proxmox calls it as `<vmid> <phase>`. On `pre-start` it takes a lock,
-#      refuses (exit 1 -> Proxmox ABORTS the start) if either other guest is
+#      refuses (exit 1 -> Proxmox ABORTS the start) if another guest is
 #      running, and live-rebinds the GPU/USB to this guest's mode if needed.
 #      Any start path — `qm start`, `pct start`, the web-UI Start button, the
 #      API, a routine — triggers it. Other phases are no-ops (stopping one
@@ -35,24 +39,50 @@ set -uo pipefail
 #      an unrecognized VM name is ignored (returns 0, normal Proxmox start),
 #      never guessed at.
 #
+#      On the Ubuntu CT it also mounts the shared game disks on the host
+#      (pre-start) and unmounts them (post-stop); a Windows start refuses to
+#      go ahead while they are still mounted. See "shared game disks" below.
+#
 #   2. As a CLI (also used by scripts/workstation.sh):
 #        gpu-arbiter.sh switch windows|macos|ubuntu   # rebind only, all guests off
 #        gpu-arbiter.sh status                        # host mode, guests, PCI drivers
 #
 # Runs as root on the Proxmox host. Logs to /var/log/gpu-arbiter.log.
-# Override discovery via env: WIN_NAME, MACOS_NAME, CT_NAME, GPU_VGA, GPU_AUD,
-# USB_FUNCS.
 
-# ---- site config -----------------------------------------------------------
+# ---- per-node overrides ----------------------------------------------------
+# Hookscripts run without the caller's env, so node-specific addresses live in
+# a file, not in env vars. See host/<node>/gpu-arbiter.conf in the repo.
+ARBITER_CONF="${ARBITER_CONF:-/etc/default/gpu-arbiter}"
+# shellcheck disable=SC1090
+[ -r "$ARBITER_CONF" ] && . "$ARBITER_CONF"
+
+# ---- site config (defaults = bare-pve) -------------------------------------
 WIN_NAME="${WIN_NAME:-windows-workstation}"
 MACOS_NAME="${MACOS_NAME:-macos-workstation}"
 CT_NAME="${CT_NAME:-ubuntu-workstation}"
 
 GPU_VGA="${GPU_VGA:-0000:01:00.0}"
 GPU_AUD="${GPU_AUD:-0000:01:00.1}"
+# Further functions of the same card (Turing: 01:00.2 USB-C xHCI, 01:00.3
+# UCSI). They sit in the GPU's IOMMU group, so they move with it; any class.
+read -r -a GPU_EXTRA <<<"${GPU_EXTRA:-}"
 read -r -a USB_FUNCS <<<"${USB_FUNCS:-0000:00:14.0 0000:00:1d.0 0000:00:1a.0 0000:00:1b.0}"
-NVIDIA_MODS=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)
-NVIDIA_NODES=(/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-modeset /dev/dri/card0 /dev/dri/renderD128)
+# DRM nodes go by PCI path, not by number: simpledrm (UEFI framebuffer) can
+# grab card0 at boot, and the GPU then comes up as card1. The CT gets the
+# whole /dev/dri, so whichever number it has is what the CT sees.
+NVIDIA_NODES=(/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-modeset
+              "/dev/dri/by-path/pci-${GPU_VGA}-card" "/dev/dri/by-path/pci-${GPU_VGA}-render")
+
+# Shared game disks: the Windows VM's data disks, NTFS, used by the Ubuntu CT
+# whenever Windows is off. SHARED_DISK_SLOTS are disk slots in the Windows
+# VM's config; the arbiter mounts every NTFS partition on them whose label is
+# in SHARED_LABELS at $SHARED_MNT_ROOT/<label> (ntfs3), and the CT gets those
+# directories as bind mounts (lxc-ct-passthrough.sh).
+read -r -a SHARED_DISK_SLOTS <<<"${SHARED_DISK_SLOTS:-}"
+read -r -a SHARED_LABELS <<<"${SHARED_LABELS:-}"
+SHARED_MNT_ROOT="${SHARED_MNT_ROOT:-/mnt/shared}"
+SHARED_UID="${SHARED_UID:-1000}"
+SHARED_GID="${SHARED_GID:-1000}"
 
 LOCK_FILE=/run/lock/gpu-arbiter.lock
 LOG_FILE=/var/log/gpu-arbiter.log
@@ -96,6 +126,16 @@ other_guest_running() { # $1 = me (windows|macos|ubuntu). Prints "<name> <id>"
 cur_driver() { # $1 = 0000:BB:DD.F
   local l="/sys/bus/pci/devices/$1/driver"
   if [ -L "$l" ]; then basename "$(readlink -f "$l")"; else echo "(none)"; fi
+}
+
+# Only USB (0x0c03xx) / audio (0x0403xx) functions may go to vfio via USB_FUNCS.
+# Guards against a wrong-node address list (00:14.0 is xHCI on Intel 8-series,
+# but SMBus on AMD FCH).
+_passable() {
+  case "$(cat "/sys/bus/pci/devices/$1/class" 2>/dev/null)" in
+    0x0c03*|0x0403*) return 0 ;;
+  esac
+  return 1
 }
 
 host_mode() {
@@ -142,7 +182,16 @@ switch_to_windows() {
   systemctl stop nvidia-persistenced 2>/dev/null || true
   modprobe vfio-pci 2>/dev/null || modprobe vfio_pci 2>/dev/null || true
   local d rc=0
-  for d in "$GPU_VGA" "$GPU_AUD" "${USB_FUNCS[@]}"; do
+  bind_to "$GPU_VGA" vfio-pci || rc=1
+  bind_to "$GPU_AUD" vfio-pci || rc=1
+  for d in "${GPU_EXTRA[@]}"; do
+    bind_to "$d" vfio-pci || rc=1
+  done
+  for d in "${USB_FUNCS[@]}"; do
+    if ! _passable "$d"; then
+      log "  $d: class $(cat "/sys/bus/pci/devices/$d/class" 2>/dev/null || echo missing) is not USB/audio — skipped, fix USB_FUNCS"
+      rc=1; continue
+    fi
     bind_to "$d" vfio-pci || rc=1
   done
   [ "$(cur_driver "$GPU_VGA")" = vfio-pci ] || rc=1
@@ -163,7 +212,7 @@ switch_to_ubuntu() {
   # 1. FREE the functions from vfio-pci FIRST. `modprobe nvidia` fails with
   #    "No such device" while vfio-pci still holds the only NVIDIA GPU, and
   #    then the rebind leaves it unbound. Clear override, forget the id, unbind.
-  for d in "$GPU_VGA" "$GPU_AUD" "${USB_FUNCS[@]}"; do
+  for d in "$GPU_VGA" "$GPU_AUD" "${GPU_EXTRA[@]}" "${USB_FUNCS[@]}"; do
     [ "$(cur_driver "$d")" = vfio-pci ] || continue
     printf '\n' >"/sys/bus/pci/devices/$d/driver_override" 2>/dev/null || true
     _vfio_forget "$d"
@@ -173,32 +222,32 @@ switch_to_ubuntu() {
   #    `-a`: without it modprobe treats nvidia_uvm / nvidia_modeset as kernel
   #    params to `nvidia` and silently drops them ("unknown parameter ... ignored").
   modprobe -a nvidia nvidia_uvm nvidia_modeset 2>/dev/null || true
-  modprobe -r nvidia_drm 2>/dev/null || true
-  modprobe nvidia_drm modeset=1 fbdev=1 2>/dev/null || modprobe nvidia_drm 2>/dev/null || true
-  modprobe snd_hda_intel xhci_pci ehci_pci ehci-pci 2>/dev/null || true
+  # nvidia_drm needs modeset=1 (+ fbdev for /dev/fb0). NEVER unload it once
+  # it is in: with a console on the card, `modprobe -r nvidia_drm` waits for
+  # the display engine to idle, and after the GPU has been in a VM that can
+  # hang in the kernel for good ("Idling display engine timed out", rmmod in
+  # D state, only a reboot helps). Reload only when it is absent or was
+  # loaded without modeset (an unused console-less load unloads fine).
+  if [ "$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null)" != Y ]; then
+    [ -d /sys/module/nvidia_drm ] && modprobe -r nvidia_drm 2>/dev/null
+    modprobe nvidia_drm modeset=1 fbdev=1 2>/dev/null || modprobe nvidia_drm 2>/dev/null || true
+  fi
+  modprobe -a snd_hda_intel xhci_pci ehci_pci ohci_pci 2>/dev/null || true
   # 3. bind
   bind_to "$GPU_VGA" nvidia || rc=1
   bind_to "$GPU_AUD" ""     || rc=1                # snd_hda_intel
+  for d in "${GPU_EXTRA[@]}"; do
+    bind_to "$d" "" || rc=1                        # xhci_pci / ucsi_ccg
+  done
   for d in "${USB_FUNCS[@]}"; do
-    bind_to "$d" "" || rc=1                        # xhci_pci / ehci-pci / snd_hda_intel
+    bind_to "$d" "" || rc=1                        # xhci/ehci/ohci_pci / snd_hda_intel
   done
   systemctl start nvidia-persistenced 2>/dev/null || true
   [ "$(cur_driver "$GPU_VGA")" = nvidia ] || { log "  GPU did not bind nvidia"; return 1; }
 
   # Nodes must exist before lxc binds them (the hook runs in the host ns, first).
-  # nvidia-modprobe is what *creates* /dev/nvidia0 + /dev/nvidiactl, but it can
-  # only do that once the nvidia kernel module has *internally* finished
-  # registering the GPU — `Kernel driver in use: nvidia` (what cur_driver
-  # checks above) only means the PCI subsystem bound the driver; the module's
-  # own probe (vBIOS init, KMS/DRM registration, framebuffer takeover, and —
-  # after a live unbind from vfio-pci — an actual device reset) can still be
-  # running for a while after that, especially right after a host reboot.
-  # Polling nvidia-modprobe's exit status and hoping (2026-09-10 PR #11: 15s
-  # budget; 2026-09-12: still not always enough) is guessing at a timeout for
-  # a condition we can just check directly: the module publishes
-  # /proc/driver/nvidia/gpus/<BDF>/ the moment registration completes. Wait on
-  # THAT (deterministic, no arbitrary budget to tune), then create the nodes
-  # once — not in a hope-it-eventually-works loop.
+  # Wait for the module's own registration (/proc/driver/nvidia/gpus/<BDF>/),
+  # not just the PCI bind, then create the nodes deterministically.
   local gpu_proc="/proc/driver/nvidia/gpus/${GPU_VGA}" waited=0
   while [ ! -d "$gpu_proc" ] && [ "$waited" -lt 1200 ]; do sleep 0.1; waited=$((waited + 1)); done
   if [ ! -d "$gpu_proc" ]; then
@@ -206,14 +255,8 @@ switch_to_ubuntu() {
     rc=1
   else
     [ "$waited" -gt 0 ] && log "  nvidia registered $GPU_VGA after ${waited}00ms"
-    # nvidia-modprobe is unreliable: 2026-09-13, `strace` showed it read
-    # /proc/devices + /proc/driver/nvidia/params and exited 0 WITHOUT ever
-    # calling mknod — it decided (wrongly, on this box: /dev is not devtmpfs
-    # auto-managed by the driver) that creating the nodes wasn't its job.
-    # Still try it first (harmless, occasionally does the job), then fall
-    # back to creating the nodes ourselves: major from /proc/devices, minor
-    # from documented NVIDIA convention / the driver's own per-GPU proc entry.
-    # This is not a race anymore — it's a plain mknod, deterministic.
+    # nvidia-modprobe sometimes exits 0 without mknod — try it, then fall back
+    # to creating the nodes ourselves (major from /proc/devices).
     nvidia-modprobe -c0 -u -m 2>/dev/null || nvidia-modprobe -c0 -u 2>/dev/null || true
     udevadm settle --timeout=10 2>/dev/null || true
 
@@ -243,8 +286,7 @@ switch_to_ubuntu() {
 do_switch() { # $1 target  — live rebind only, no guest-running guard (caller's job)
   local target=$1 from; from=$(host_mode)
   # Always run the (idempotent) rebind — even when the GPU is already on the
-  # right driver the USB / audio functions may not be (e.g. after a manual
-  # host bring-up).
+  # right driver the USB / audio functions may not be.
   [ "$from" = "$target" ] && log "host GPU already $target — verifying USB/audio" \
                           || log "swapping host $from -> $target (live PCI rebind)"
   local rc=0
@@ -255,11 +297,70 @@ do_switch() { # $1 target  — live rebind only, no guest-running guard (caller'
   esac
   if [ "$rc" -ne 0 ]; then
     log "live rebind to $target FAILED — a device is still held (guest not fully stopped,"
-    log "nvidia-persistenced, or an Xorg on the host). Recover with:"
+    log "nvidia-persistenced, or an Xorg on the host) or USB_FUNCS is wrong. Recover with:"
     log "    scripts/workstation.sh switch $target --via-reboot"
     return 1
   fi
   log "host now in $target mode"
+}
+
+# ---- shared game disks ---------------------------------------------------
+# Host block devices of the Windows VM's shared slots, one per line.
+_shared_devs() {
+  local win slot vol
+  win=$(win_vmid); [ -n "$win" ] || return 0
+  for slot in "${SHARED_DISK_SLOTS[@]}"; do
+    vol=$(qm config "$win" 2>/dev/null | sed -n "s/^${slot}: \([^,]*\).*/\1/p")
+    [ -n "$vol" ] || { log "  shared: $slot not in VM $win config, skipped"; continue; }
+    pvesm path "$vol" 2>/dev/null || log "  shared: no host path for $vol"
+  done
+}
+
+_shared_known_label() { local l; for l in "${SHARED_LABELS[@]}"; do [ "$l" = "$1" ] && return 0; done; return 1; }
+
+# Mount every labelled NTFS partition for the CT. Never fatal: a missing or
+# hibernated (Windows Fast Startup) volume only means the CT starts without
+# it — the bind-mount target stays an immutable empty dir, so nothing can be
+# written to the host rootfs by mistake.
+shared_mount() {
+  [ "${#SHARED_DISK_SLOTS[@]}" -gt 0 ] || return 0
+  local dev dm part label mnt
+  while read -r dev; do
+    [ -n "$dev" ] || continue
+    lvchange -ay "$dev" >/dev/null 2>&1 || true
+    kpartx -as "$dev" >/dev/null 2>&1 || { log "  shared: kpartx failed on $dev"; continue; }
+    dm=$(dmsetup info -c --noheadings -o name "$dev" 2>/dev/null) || continue
+    for part in /dev/mapper/"${dm}"p*; do
+      [ -b "$part" ] || continue
+      [ "$(blkid -o value -s TYPE "$part" 2>/dev/null)" = ntfs ] || continue
+      label=$(blkid -o value -s LABEL "$part" 2>/dev/null)
+      _shared_known_label "$label" || continue
+      mnt="$SHARED_MNT_ROOT/$label"
+      mountpoint -q "$mnt" && { log "  shared: $mnt already mounted"; continue; }
+      install -d "$mnt"
+      if mount -t ntfs3 -o "uid=$SHARED_UID,gid=$SHARED_GID,windows_names,prealloc,noatime" "$part" "$mnt" 2>>"$LOG_FILE"; then
+        log "  shared: $part ($label) -> $mnt"
+      else
+        log "  shared: mount of $part ($label) FAILED — hibernated by Windows Fast Startup? (powercfg /h off in Windows)"
+      fi
+    done
+  done < <(_shared_devs)
+}
+
+# Unmount everything under SHARED_MNT_ROOT and drop the partition maps.
+# Returns 1 if something is still mounted: Windows must not start then.
+shared_umount() {
+  [ "${#SHARED_DISK_SLOTS[@]}" -gt 0 ] || return 0
+  local mnt dev rc=0
+  for mnt in $(findmnt -rn -o TARGET | grep "^${SHARED_MNT_ROOT}/" || true); do
+    if umount "$mnt" 2>>"$LOG_FILE"; then log "  shared: unmounted $mnt"
+    else log "  shared: $mnt is BUSY ($(fuser -vm "$mnt" 2>&1 | tail -n +2 | awk '{print $NF}' | sort -u | tr '\n' ' '))"; rc=1
+    fi
+  done
+  [ "$rc" -eq 0 ] || return 1
+  while read -r dev; do
+    [ -n "$dev" ] && kpartx -ds "$dev" >/dev/null 2>&1 || true
+  done < <(_shared_devs)
 }
 
 # ---- Proxmox hook: pre-start ------------------------------------------
@@ -290,20 +391,37 @@ hook_prestart() { # $1 = vmid
     exit 1
   fi
 
+  if [ "$me" = windows ] && ! shared_umount; then
+    log "REFUSING to start $vmid: shared game disks still mounted on the host."
+    exit 1
+  fi
   do_switch "$target" || exit 1
+  [ "$me" = ubuntu ] && shared_mount
   log "pre-start: ok, $me may start"
+}
+
+# ---- Proxmox hook: post-stop (CT only) --------------------------------
+# Releases the shared game disks once the CT is down. Not a chain: nothing
+# else is started.
+#
+# NO LOCK here. workstation.sh holds the lock while it stops the CT, and
+# lxc-stop does not return until this hook has finished: waiting for the
+# lock would deadlock both (the CT hangs as "running" without a PID). No
+# lock is needed either: the CT is down, and its next pre-start cannot run
+# before this hook returns; a Windows pre-start unmounts again under the lock.
+hook_poststop() { # $1 = vmid
+  [ -f "/etc/pve/lxc/${1}.conf" ] || return 0
+  log "post-stop: vmid=$1 (ubuntu), releasing shared game disks"
+  shared_umount || log "post-stop: shared disks still mounted — the next Windows start will refuse"
 }
 
 # ---- CLI: status -----------------------------------------------------
 cmd_status() {
   local win ct mac; win=$(win_vmid); ct=$(ct_vmid); mac=$(macos_vmid)
   local mode; mode=$(host_mode)
-  # host_mode() only sees the PCI driver (vfio-pci -> "windows") -- it can't
-  # tell macOS apart from Windows at that level, both are vfio passthrough.
-  # Disambiguate the display only, never the actual routing/behavior: when
-  # there's no macos guest (mac empty) or it isn't running, this is a no-op
-  # and the line is byte-identical to the pre-3-way output.
+  # host_mode() can't tell macOS from Windows (both vfio) — disambiguate display only.
   [ "$mode" = windows ] && vm_running "$mac" && mode=macos
+  echo "config         : $([ -r "$ARBITER_CONF" ] && echo "$ARBITER_CONF" || echo "built-in defaults (bare-pve)")"
   echo "host mode      : $mode   (GPU $GPU_VGA driver: $(cur_driver "$GPU_VGA"))"
   echo "windows VM     : id=${win:-not-created}  $(vm_running "$win" && echo RUNNING || echo stopped)"
   echo "macos   VM     : id=${mac:-not-created}  $(vm_running "$mac" && echo RUNNING || echo stopped)"
@@ -311,9 +429,15 @@ cmd_status() {
   echo
   echo "PCI function -> driver:"
   local d
-  for d in "$GPU_VGA" "$GPU_AUD" "${USB_FUNCS[@]}"; do
+  for d in "$GPU_VGA" "$GPU_AUD" "${GPU_EXTRA[@]}" "${USB_FUNCS[@]}"; do
     printf '  %s  %s\n' "$d" "$(cur_driver "$d")"
   done
+  if [ "${#SHARED_DISK_SLOTS[@]}" -gt 0 ]; then
+    echo
+    echo "shared game disks (${SHARED_DISK_SLOTS[*]} of the windows VM):"
+    _shared_devs | sed 's/^/  /'
+    findmnt -rn -o TARGET,SOURCE,FSTYPE | grep "^${SHARED_MNT_ROOT}/" | sed 's/^/  mounted: /' || echo "  (not mounted)"
+  fi
 }
 
 # ---- CLI: switch ---------------------------------------------------
@@ -332,7 +456,8 @@ cmd_switch() { # $1 = windows|macos|ubuntu
 need_root
 case "${2:-}" in
   pre-start)                    hook_prestart "${1:?vmid}" ;;
-  post-start|pre-stop|post-stop) exit 0 ;;   # never auto-chain
+  post-stop)                    hook_poststop "${1:?vmid}" ;;   # unmount only, never auto-chain
+  post-start|pre-stop)          exit 0 ;;
   *)
     case "${1:-}" in
       switch) cmd_switch "${2:-}" ;;
@@ -340,11 +465,14 @@ case "${2:-}" in
       *) cat >&2 <<EOF
 gpu-arbiter.sh — Proxmox GPU/USB arbiter
 
-As a hookscript (attached to all three guests):  gpu-arbiter.sh <vmid> <phase>
+As a hookscript (attached to the guests):  gpu-arbiter.sh <vmid> <phase>
 As a CLI:
   gpu-arbiter.sh switch <windows|macos|ubuntu>   rebind GPU/USB (all guests must be off)
   gpu-arbiter.sh status                          show host mode, guests, PCI drivers
+
+Per-node config: $ARBITER_CONF
 EOF
          exit 1 ;;
     esac ;;
 esac
+
